@@ -52,3 +52,4 @@ __pycache__/
 ### Stray Node lockfiles (this is a Java/Gradle project) ###
 node_modules/
 package-lock.json
+Microbot.jar
