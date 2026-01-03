@@ -164,9 +164,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.Join prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -409,9 +411,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.Part prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -683,9 +687,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.Data prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -1175,9 +1181,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.C2S prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -1587,9 +1595,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.UserJoin prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -1896,9 +1906,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.UserPart prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -2295,9 +2307,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.PartyData prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
@@ -2845,9 +2859,11 @@ package net.runelite.client.party;
           DEFAULT_INSTANCE, input, extensionRegistry);
     }
 
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder() {
       return (Builder) DEFAULT_INSTANCE.createBuilder();
     }
+    @SuppressWarnings("unchecked")
     public static Builder newBuilder(net.runelite.client.party.Party.S2C prototype) {
       return (Builder) DEFAULT_INSTANCE.createBuilder(prototype);
     }
