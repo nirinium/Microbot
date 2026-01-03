@@ -11,7 +11,7 @@ import javax.inject.Inject;
 import java.awt.*;
 
 @PluginDescriptor(
-        name = PluginDescriptor.Default + "Example Plugin",
+        name = PluginDescriptor.Default + "Nirinium Example Plugin",
         description = "Performance test for GameObject composition retrieval",
         tags = {"performance", "microbot", "test", "gameobject"},
         enabledByDefault = false
