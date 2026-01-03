@@ -304,6 +304,10 @@ public class ImageUtil
 	 */
 	public static BufferedImage flipImage(final BufferedImage image, final boolean horizontal, final boolean vertical)
 	{
+		if (image == null)
+		{
+			throw new IllegalArgumentException("Cannot flip a null image");
+		}
 		int x = 0;
 		int y = 0;
 		int w = image.getWidth();
@@ -399,9 +403,30 @@ public class ImageUtil
 	{
 		try (InputStream in = c.getResourceAsStream(path))
 		{
+			if (in == null)
+			{
+				final String filePath;
+				if (path.startsWith("/"))
+				{
+					filePath = path;
+				}
+				else
+				{
+					filePath = c.getPackage().getName().replace('.', '/') + "/" + path;
+				}
+				log.error("Resource not found for class: {}, path: {}", c.getName(), filePath);
+				throw new IllegalArgumentException("Resource not found: " + filePath);
+			}
+
 			synchronized (ImageIO.class)
 			{
-				return ImageIO.read(in);
+				BufferedImage image = ImageIO.read(in);
+				if (image == null)
+				{
+					log.error("ImageIO.read returned null for path: {}", path);
+					throw new IllegalArgumentException("Failed to read image: " + path);
+				}
+				return image;
 			}
 		}
 		catch (IllegalArgumentException e)
