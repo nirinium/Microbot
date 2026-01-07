@@ -1,6 +1,5 @@
 package net.runelite.client.plugins.microbot.nirismelter;
 
-import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.Plugin;
@@ -32,11 +31,6 @@ public class NiriSmelterPlugin extends Plugin {
 
     @Inject
     private ConfigManager configManager;
-
-    @Provides
-    NiriSmelterConfig provideConfig(ConfigManager configManager) {
-        return configManager.getConfig(NiriSmelterConfig.class);
-    }
 
     @Override
     protected void startUp() throws AWTException {
