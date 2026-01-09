@@ -526,3 +526,31 @@ tasks.withType<Test> {
 tasks.javadoc {
     title = "RuneLite Client ${project.version} API"
 }
+
+// Custom task to build nirismelter plugin as standalone JAR
+tasks.register<Jar>("buildNiriSmelterPlugin") {
+    group = "microbot"
+    description = "Build nirismelter plugin as a standalone JAR"
+    
+    archiveBaseName.set("nirismelter-plugin")
+    archiveVersion.set(microbotVersionProvider.get())
+    destinationDirectory.set(file("${buildDir}/plugins"))
+    
+    from(sourceSets.main.get().output) {
+        include("net/runelite/client/plugins/microbot/nirismelter/**")
+    }
+    
+    manifest {
+        attributes(
+            "Plugin-Name" to "Niri Smelter",
+            "Plugin-Description" to "Automated smelting script for Microbot",
+            "Plugin-Version" to microbotVersionProvider.get(),
+            "Plugin-Provider" to "Microbot",
+            "Plugin-Package" to "net.runelite.client.plugins.microbot.nirismelter"
+        )
+    }
+    
+    doLast {
+        println("Niri Smelter plugin JAR created at: ${archiveFile.get()}")
+    }
+}
