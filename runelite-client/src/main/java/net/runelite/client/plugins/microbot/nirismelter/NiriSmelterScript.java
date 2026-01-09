@@ -213,9 +213,13 @@ public class NiriSmelterScript extends Script {
         }
         
         Rs2Bank.closeBank();
-        sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
+        sleepUntil(() -> !Rs2Bank.isOpen(), 3000);
+        
+        // Extra delay to ensure bank is fully closed
+        sleep(300, 600);
         
         tripsCompleted++;
+        log.info("Trip {} complete, heading to furnace", tripsCompleted);
         sleep(config.minBreakDelay(), config.maxBreakDelay());
     }
     
@@ -230,6 +234,7 @@ public class NiriSmelterScript extends Script {
         // Find nearest furnace
         Rs2TileObjectModel furnace = tileObjectCache.query()
                 .withName("Furnace")
+                .within(15)
                 .nearest();
         
         if (furnace == null) {
@@ -239,6 +244,10 @@ public class NiriSmelterScript extends Script {
         
         log.info("Smelting {} ores", config.oreType().getPrimaryOre());
         
+        // Count ores and current bars before smelting
+        int oresBeforeSmelting = countOresInInventory();
+        int barsBeforeSmelting = Rs2Inventory.count(config.oreType().getBarName());
+        
         // Click furnace
         furnace.click("Smelt");
         sleepUntil(() -> isSmelterInterfaceOpen(), 5000);
@@ -246,21 +255,31 @@ public class NiriSmelterScript extends Script {
         if (isSmelterInterfaceOpen()) {
             // Select the bar to smelt
             selectBar();
+            sleep(600, 900);
             
-            // Count ores before smelting
-            int oresBeforeSmelting = countOresInInventory();
+            // Wait for smelting animation to start
+            sleepUntil(Rs2Player::isAnimating, 3000);
             
-            // Wait for smelting to complete
-            sleepUntil(() -> !hasOresInInventory() || Rs2Player.isAnimating() == false, 60000);
+            // Wait for all bars to be created - check that inventory changed
+            sleepUntil(() -> {
+                int currentBars = Rs2Inventory.count(config.oreType().getBarName());
+                int currentOres = countOresInInventory();
+                // Smelting complete when we have more bars or no ores left
+                return currentBars > barsBeforeSmelting || currentOres == 0;
+            }, 60000);
             
-            // Wait a bit more to ensure animation completes
-            sleep(1200, 1800);
+            // Wait for animation to fully complete
+            sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+            sleep(600, 1200);
             
             // Count bars created
-            int barsCreated = Rs2Inventory.count(config.oreType().getBarName());
+            int barsAfterSmelting = Rs2Inventory.count(config.oreType().getBarName());
+            int barsCreated = barsAfterSmelting - barsBeforeSmelting;
             oresSmelted += barsCreated;
             
             log.info("Smelted {} bars (total: {})", barsCreated, oresSmelted);
+        } else {
+            log.warn("Smelting interface did not open");
         }
         
         sleep(config.minBreakDelay(), config.maxBreakDelay());
@@ -281,17 +300,28 @@ public class NiriSmelterScript extends Script {
     
     private void selectBar() {
         // Click on the appropriate bar based on ore type
-        // This uses "Smelt All" by default
         OreType oreType = config.oreType();
         
-        // Try to click the bar widget - interface varies but generally clicking the bar name works
+        log.info("Selecting bar type: {}", oreType.getBarName());
+        
+        // Try to click the bar widget by name
         if (Rs2Widget.clickWidget(oreType.getBarName())) {
+            log.info("Clicked bar widget by name");
             sleep(100, 300);
-        } else {
-            // Fallback: press spacebar to smelt all of the first option
-            log.info("Could not find specific bar widget, using spacebar");
-            Microbot.getMouse().click();
+            return;
         }
+        
+        // Try clicking "Smelt All" text if available
+        if (Rs2Widget.clickWidget("Smelt All")) {
+            log.info("Clicked Smelt All widget");
+            sleep(100, 300);
+            return;
+        }
+        
+        // Fallback: press space to smelt all
+        log.info("Using space bar to smelt all");
+        Microbot.getMouse().click();
+        sleep(100, 300);
     }
     
     private boolean drinkStaminaPotion() {
