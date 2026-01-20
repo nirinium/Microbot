@@ -1,6 +1,7 @@
 package net.runelite.client.plugins.microbot.vorkath;
 
 import net.runelite.client.config.Config;
+import net.runelite.client.config.ConfigButton;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
@@ -141,10 +142,21 @@ public interface VorkathConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "testFriendHouse",
+            name = "Test Friend's House",
+            description = "Test entering the friend's house (make sure you're near a portal)",
+            position = 3,
+            section = pohSection
+    )
+    default ConfigButton testFriendHouse() {
+        return new ConfigButton();
+    }
+
+    @ConfigItem(
             keyName = "RejuvenationPool",
             name = "Rejuvenation Pool",
             description = "Use POH rejuv Pool to restore stats",
-            position = 3,
+            position = 4,
             section = pohSection
     )
     default boolean rejuvinationPool() {

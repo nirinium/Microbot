@@ -9,6 +9,7 @@ import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ProjectileMoved;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.PluginConstants;
@@ -18,9 +19,9 @@ import javax.inject.Inject;
 import java.awt.*;
 
 @PluginDescriptor(
-        name = PluginConstants.ENGIN + "NiriVorkath",
-        description = "Microbot Vorkath plugin",
-        authors = { "Mocrosoft" },
+        name = PluginConstants.NIRI + "NiriVorkath",
+        description = "Microbot's Vorkath plugin modified by Niri",
+        authors = { "Mocrosoft/Niri" },
         version = VorkathPlugin.version,
         minClientVersion = "1.9.9.1",
         tags = {"vorkath", "microbot"},
@@ -76,6 +77,17 @@ public class VorkathPlugin extends Plugin {
     public void onChatMessage(ChatMessage event) {
         if (event.getType() == ChatMessageType.GAMEMESSAGE && event.getMessage().equalsIgnoreCase("oh dear, you are dead!")) {
             vorkathScript.state = State.DEAD_WALK;
+        }
+    }
+
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event) {
+        if (!"Vorkath Config".equals(event.getGroup())) {
+            return;
+        }
+
+        if ("testFriendHouse".equals(event.getKey())) {
+            vorkathScript.testFriendHouseEntry();
         }
     }
 }

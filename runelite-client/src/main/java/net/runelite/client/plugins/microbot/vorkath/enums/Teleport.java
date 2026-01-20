@@ -8,7 +8,8 @@ import lombok.RequiredArgsConstructor;
 public enum Teleport {
     VARROCK_TAB("Varrock teleport", "break"),
     CRAFTING_CAPE("Crafting Cape", "teleport"),
-    JEWELLERY_BOX("Jewellery Box", "Teleport Menu");
+    JEWELLERY_BOX("Jewellery Box", "Teleport Menu"),
+    HOUSE_TAB("Teleport to house", "break");
 
 
     ;private final String itemName;
