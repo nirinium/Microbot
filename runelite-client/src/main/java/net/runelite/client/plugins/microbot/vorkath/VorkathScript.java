@@ -157,8 +157,13 @@ public class VorkathScript extends Script {
                         if (isCloseToRelleka() && Rs2Inventory.count() >= 27) {
                             state = State.WALK_TO_VORKATH_ISLAND;
                         }
+                        
+                        // Check rune pouch quantities before banking
+                        boolean hasEnoughRunesInPouch = checkRunePouchQuantities();
+                        
                         hasEquipment = rs2InventorySetup.doesEquipmentMatch();
                         hasInventory = rs2InventorySetup.doesInventoryMatch();
+                        
                         if (!Rs2Bank.isOpen()) {
                             Rs2Bank.walkToBankAndUseBank();
                         }
@@ -166,6 +171,10 @@ public class VorkathScript extends Script {
                             hasEquipment = rs2InventorySetup.loadEquipment();
                         }
                         if (!hasInventory && rs2InventorySetup.doesEquipmentMatch()) {
+                            // Skip rune pouch items if we have enough runes
+                            if (hasEnoughRunesInPouch) {
+                                Microbot.log("Rune pouch has sufficient runes (>1000 each), skipping rune withdrawal");
+                            }
                             hasInventory = rs2InventorySetup.loadInventory();
                             sleep(1000);
                         }
@@ -492,6 +501,66 @@ public class VorkathScript extends Script {
                     Rs2Inventory.interact("crafting cape", "teleport");
                 }
                 break;
+            case HOUSE_TAB:
+                // Teleport using house tablet
+                Rs2Inventory.interact(config.teleportMode().getItemName(), config.teleportMode().getAction());
+                Rs2Player.waitForAnimation();
+                sleepUntil(() -> Rs2GameObject.findObjectById(ObjectID.POH_EXIT_PORTAL) != null, 5000);
+                
+                // Check if rejuv pool exists in own house
+                boolean hasOwnRejuvPool = Rs2GameObject.findObjectById(29241) != null;
+                
+                // Use rejuvenation pool if available and configured
+                if (config.rejuvinationPool() && hasOwnRejuvPool) {
+                    Rs2GameObject.interact(29241, "Drink");
+                    sleepUntil(() -> Rs2Player.isFullHealth());
+                }
+                
+                // Always exit using "Outside" option as primary method
+                if (Rs2GameObject.interact(ObjectID.POH_EXIT_PORTAL, "Outside")) {
+                    sleepUntil(() -> !Rs2Player.IsInInstance(), 5000);
+                }
+                
+                // If no rejuv pool in own house and friend's house is configured, use their facilities
+                boolean needFriendHouse = (!hasOwnRejuvPool && config.rejuvinationPool()) 
+                    || config.useOtherPlayerPOH();
+                
+                if (needFriendHouse && !config.otherPlayerName().isEmpty()) {
+                    // Enter friend's house from outside
+                    if (Rs2GameObject.interact(ObjectID.POH_RIMMINGTON_PORTAL, "Friend's house")) {
+                        sleepUntil(() -> Rs2Widget.hasWidget("Enter name"), 3000);
+                        
+                        // Check if player is in recent list or need to type name
+                        if (Rs2Widget.hasWidget(config.otherPlayerName())) {
+                            Rs2Widget.clickWidget(config.otherPlayerName());
+                        } else if (Rs2Widget.hasWidget("Enter name")) {
+                            Rs2Keyboard.typeString(config.otherPlayerName());
+                            sleep(600);
+                            Rs2Keyboard.enter();
+                        }
+                        
+                        sleepUntil(() -> Rs2GameObject.findObjectById(ObjectID.POH_EXIT_PORTAL) != null, 5000);
+                        
+                        // Use friend's rejuv pool if no own pool and configured
+                        if (!hasOwnRejuvPool && config.rejuvinationPool()) {
+                            Rs2GameObject.interact(29241, "Drink");
+                            sleepUntil(() -> Rs2Player.isFullHealth());
+                        }
+                        
+                        // Check if friend has jewellery box (ID 29156) and use it for teleport
+                        if (Rs2GameObject.findObjectById(29156) != null) {
+                            Rs2GameObject.interact(29156, "Teleport Menu");
+                            sleepUntil(() -> Rs2Widget.hasWidget("Castle Wars"), 3000);
+                            Rs2Widget.clickWidget("Castle Wars");
+                        } else {
+                            // No jewellery box, exit using "Outside" option
+                            if (Rs2GameObject.interact(ObjectID.POH_EXIT_PORTAL, "Outside")) {
+                                sleepUntil(() -> !Rs2Player.IsInInstance(), 5000);
+                            }
+                        }
+                    }
+                }
+                break;
             case JEWELLERY_BOX:
                 teleToPoh();
                 if (config.rejuvinationPool()) {
@@ -507,6 +576,50 @@ public class VorkathScript extends Script {
         sleepUntil(() -> !Microbot.getClient().isInInstancedRegion());
         state = State.TELEPORT_AWAY;
 
+    }
+
+    /**
+     * Checks if the rune pouch has sufficient quantities (>1000) for all required runes.
+     * If all runes are above threshold, we don't need to withdraw/deposit them.
+     * 
+     * @return true if all required runes have >1000 quantity in the pouch
+     */
+    private boolean checkRunePouchQuantities() {
+        if (!Rs2Equipment.isWearing("Rune pouch") && !Rs2Inventory.hasItem("Rune pouch")) {
+            return false;
+        }
+        
+        // Get rune pouch container from equipment or inventory
+        int runePouchContainerId = Rs2Equipment.isWearing("Rune pouch") ? 
+            InventoryID.RUNE_POUCH.getId() : 
+            Rs2Inventory.getIdForItem("Rune pouch");
+        
+        if (runePouchContainerId == -1) return false;
+        
+        // Check each rune slot in the pouch (RUNE_POUCH_AMOUNT_1, 2, 3, 4)
+        int[] runePouchAmountVarbits = {1624, 1625, 1626, 1627}; // Varbits for rune quantities
+        
+        int runesWithSufficientQuantity = 0;
+        int totalRuneSlots = 0;
+        
+        for (int varbitId : runePouchAmountVarbits) {
+            int quantity = Microbot.getClient().getVarbitValue(varbitId);
+            if (quantity > 0) {
+                totalRuneSlots++;
+                if (quantity > 1000) {
+                    runesWithSufficientQuantity++;
+                }
+            }
+        }
+        
+        // If we have runes and all of them have >1000 quantity, we're good
+        boolean hasEnoughRunes = totalRuneSlots > 0 && runesWithSufficientQuantity == totalRuneSlots;
+        
+        if (hasEnoughRunes) {
+            Microbot.log("Rune pouch check: All " + totalRuneSlots + " rune types have >1000 quantity");
+        }
+        
+        return hasEnoughRunes;
     }
 
     private boolean drinkPotions() {
@@ -617,7 +730,7 @@ public class VorkathScript extends Script {
         WorldPoint currentPlayerLocation = Microbot.getClient().getLocalPlayer().getWorldLocation();
         WorldPoint sideStepLocation = new WorldPoint(currentPlayerLocation.getX() + 2, currentPlayerLocation.getY(), 0);
         if (Rs2Random.between(0, 2) == 1) {
-            sideStepLocation = new WorldPoint(currentPlayerLocation.getX() - 2, currentPlayerLocation.getY(), 0);
+            sideStepLocation = new WorldPoint(currentPlayerLocation.getX() - 2, currentPlayer.getY(), 0);
         }
         final WorldPoint _sideStepLocation = sideStepLocation;
         Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), _sideStepLocation));
@@ -680,6 +793,51 @@ public class VorkathScript extends Script {
                 Rs2Player.eatAt(60);
                 Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), safeTile));
             }
+        }
+    }
+
+    /**
+     * Test method to validate friend's house entry functionality.
+     * Call this from the config panel button to test the POH entry logic.
+     */
+    public void testFriendHouseEntry() {
+        if (config.otherPlayerName().isEmpty()) {
+            Microbot.log("Please enter a friend's name in the config before testing!");
+            return;
+        }
+
+        Microbot.log("Testing friend's house entry for: " + config.otherPlayerName());
+        
+        // Check if we're near a portal
+        if (Rs2GameObject.findObjectById(ObjectID.POH_RIMMINGTON_PORTAL) == null) {
+            Microbot.log("You must be near a house portal (Rimmington recommended) to test this feature!");
+            return;
+        }
+
+        // Try to enter friend's house
+        if (Rs2GameObject.interact(ObjectID.POH_RIMMINGTON_PORTAL, "Friend's house")) {
+            sleepUntil(() -> Rs2Widget.hasWidget("Enter name"), 3000);
+            
+            // Check if player is in recent list or need to type name
+            if (Rs2Widget.hasWidget(config.otherPlayerName())) {
+                Microbot.log("Found friend in recent list, clicking...");
+                Rs2Widget.clickWidget(config.otherPlayerName());
+            } else if (Rs2Widget.hasWidget("Enter name")) {
+                Microbot.log("Typing friend's name: " + config.otherPlayerName());
+                Rs2Keyboard.typeString(config.otherPlayerName());
+                sleep(600);
+                Rs2Keyboard.enter();
+            }
+            
+            sleepUntil(() -> Rs2GameObject.findObjectById(ObjectID.POH_EXIT_PORTAL) != null, 5000);
+            
+            if (Rs2GameObject.findObjectById(ObjectID.POH_EXIT_PORTAL) != null) {
+                Microbot.log("Successfully entered friend's house!");
+            } else {
+                Microbot.log("Failed to enter friend's house. Check if the name is correct and they have visitor access enabled.");
+            }
+        } else {
+            Microbot.log("Failed to interact with portal!");
         }
     }
 }
