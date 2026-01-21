@@ -589,13 +589,6 @@ public class VorkathScript extends Script {
             return false;
         }
         
-        // Get rune pouch container from equipment or inventory
-        int runePouchContainerId = Rs2Equipment.isWearing("Rune pouch") ? 
-            InventoryID.RUNE_POUCH.getId() : 
-            Rs2Inventory.getIdForItem("Rune pouch");
-        
-        if (runePouchContainerId == -1) return false;
-        
         // Check each rune slot in the pouch (RUNE_POUCH_AMOUNT_1, 2, 3, 4)
         int[] runePouchAmountVarbits = {1624, 1625, 1626, 1627}; // Varbits for rune quantities
         
@@ -730,7 +723,7 @@ public class VorkathScript extends Script {
         WorldPoint currentPlayerLocation = Microbot.getClient().getLocalPlayer().getWorldLocation();
         WorldPoint sideStepLocation = new WorldPoint(currentPlayerLocation.getX() + 2, currentPlayerLocation.getY(), 0);
         if (Rs2Random.between(0, 2) == 1) {
-            sideStepLocation = new WorldPoint(currentPlayerLocation.getX() - 2, currentPlayer.getY(), 0);
+            sideStepLocation = new WorldPoint(currentPlayerLocation.getX() - 2, currentPlayerLocation.getY(), 0);
         }
         final WorldPoint _sideStepLocation = sideStepLocation;
         Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), _sideStepLocation));
