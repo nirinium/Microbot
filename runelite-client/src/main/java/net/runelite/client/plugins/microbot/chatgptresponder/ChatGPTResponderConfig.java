@@ -52,7 +52,7 @@ public interface ChatGPTResponderConfig extends Config {
         position = 2
     )
     default String systemPrompt() {
-        return "You are a helpful Old School RuneScape player. Keep responses brief (under 80 characters) and casual.";
+        return "you are a laid back osrs player, use terrible spelling and punctuation, be brief. punctuation needs to be way worse no capitalization etc.";
     }
 
     @ConfigItem(
@@ -130,5 +130,16 @@ public interface ChatGPTResponderConfig extends Config {
     )
     default boolean onlyRespondToMentions() {
         return false;
+    }
+
+    @ConfigItem(
+        keyName = "congratulateQuestCompletions",
+        name = "Congratulate Quest Completions",
+        description = "Automatically say 'Gzzz!' when clan members complete quests",
+        section = behaviorSection,
+        position = 7
+    )
+    default boolean congratulateQuestCompletions() {
+        return true;
     }
 }
