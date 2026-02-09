@@ -12,6 +12,7 @@ import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import okhttp3.*;
 
 import javax.inject.Inject;
+import java.awt.event.KeyEvent;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -77,6 +78,19 @@ public class ChatGPTResponderScript extends Script {
     public void onChatMessage(ChatMessage event) {
         try {
             if (!Microbot.isLoggedIn()) return;
+
+            // Handle quest completion messages in clan chat
+            if (config.congratulateQuestCompletions() && isClanMessage(event.getType())) {
+                if (isQuestCompletion(event.getMessage())) {
+                    String gzzVariation = getRandomGzzVariation();
+                    log.info("Quest completed! Responding with: {}", gzzVariation);
+                    sleep(Rs2Random.between(500, 1500));
+                    sendPublicMessage(gzzVariation);
+                    return;
+                }
+            }
+
+            // AI responses require API key
             if (config.apiKey().isEmpty()) return;
 
             // Check message type
@@ -144,8 +158,10 @@ public class ChatGPTResponderScript extends Script {
 
             log.info("Responding to {}: {}", pending.senderName, response);
 
-            // Send response in game
-            sendChatMessage(response);
+            // Send response in game - use Tab for private messages, Enter for public
+            boolean isPrivate = pending.type == ChatMessageType.PRIVATECHAT || 
+                               pending.type == ChatMessageType.MODPRIVATECHAT;
+            sendChatMessage(response, isPrivate);
             
             messagesProcessed++;
             lastError = null;
@@ -208,18 +224,24 @@ public class ChatGPTResponderScript extends Script {
         }
     }
 
-    private void sendChatMessage(String message) {
-        // Press Enter to open chat
-        Rs2Keyboard.keyPress('\n');
-        sleep(200, 400);
+    private void sendChatMessage(String message, boolean isPrivateMessage) {
+        if (isPrivateMessage) {
+            // Press Tab to open private message dialogue box
+            Rs2Keyboard.keyPress(KeyEvent.VK_TAB);
+            sleep(300, 500);
+        } else {
+            // Press Enter to open public chat
+            Rs2Keyboard.keyPress(KeyEvent.VK_ENTER);
+            sleep(300, 500);
+        }
         
         // Type the message
         Rs2Keyboard.typeString(message);
-        sleep(200, 400);
+        sleep(300, 500);
         
         // Press Enter to send
-        Rs2Keyboard.keyPress('\n');
-        sleep(100, 200);
+        Rs2Keyboard.enter();
+        sleep(200, 300);
     }
 
     private void updateIgnoredPlayers() {
@@ -231,6 +253,43 @@ public class ChatGPTResponderScript extends Script {
                     .map(String::toLowerCase)
                     .forEach(ignoredPlayers::add);
         }
+    }
+
+    private boolean isClanMessage(ChatMessageType type) {
+        return type == ChatMessageType.CLAN_CHAT ||
+               type == ChatMessageType.CLAN_MESSAGE ||
+               type == ChatMessageType.CLAN_GUEST_CHAT ||
+               type == ChatMessageType.CLAN_GUEST_MESSAGE ||
+               type == ChatMessageType.CLAN_GIM_CHAT ||
+               type == ChatMessageType.CLAN_GIM_MESSAGE;
+    }
+
+    private boolean isQuestCompletion(String message) {
+        String lower = message.toLowerCase();
+        return lower.contains("has completed") && lower.contains("quest");
+    }
+
+    private String getRandomGzzVariation() {
+        String[] variations = {
+            "Gzzz!",
+            "GzzZzzz!",
+            "Gzzzz!",
+            "GZ!",
+            "Gzzzzz!",
+            "GzzZzz!",
+            "gratz!",
+            "gz gz"
+        };
+        return variations[Rs2Random.between(0, variations.length - 1)];
+    }
+
+    private void sendPublicMessage(String message) {
+        Rs2Keyboard.keyPress(KeyEvent.VK_ENTER);
+        sleep(300, 500);
+        Rs2Keyboard.typeString(message);
+        sleep(300, 500);
+        Rs2Keyboard.enter();
+        sleep(200, 300);
     }
 
     @Override

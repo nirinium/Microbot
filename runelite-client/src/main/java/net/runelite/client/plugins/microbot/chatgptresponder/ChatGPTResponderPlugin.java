@@ -1,8 +1,10 @@
 package net.runelite.client.plugins.microbot.chatgptresponder;
 
+import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
@@ -32,6 +34,11 @@ public class ChatGPTResponderPlugin extends Plugin {
     
     @Inject
     private OverlayManager overlayManager;
+
+    @Provides
+    ChatGPTResponderConfig provideConfig(ConfigManager configManager) {
+        return configManager.getConfig(ChatGPTResponderConfig.class);
+    }
 
     @Override
     protected void startUp() throws AWTException {
