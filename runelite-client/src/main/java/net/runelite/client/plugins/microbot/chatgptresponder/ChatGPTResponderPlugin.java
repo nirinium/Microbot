@@ -15,7 +15,7 @@ import javax.inject.Inject;
 import java.awt.*;
 
 @PluginDescriptor(
-        name = PluginDescriptor.Default + "ChatGPT Responder",
+        name = PluginDescriptor.NIRI + "ChatGPT Responder",
         description = "Automatically responds to in-game chat messages using ChatGPT",
         tags = {"chat", "ai", "microbot", "chatgpt", "automation"},
         enabledByDefault = false
