@@ -10,7 +10,7 @@ import net.runelite.client.ui.overlay.OverlayManager;
 import javax.inject.Inject;
 
 @PluginDescriptor(
-	name = PluginDescriptor.Default + "Niri Motherlode Miner",
+	name = PluginDescriptor.NIRI + "Niri Motherlode Miner",
 	description = "Automated Motherlode Mine script for mining pay-dirt",
 	tags = {"mining", "motherlode", "microbot", "niri"},
 	enabledByDefault = false
