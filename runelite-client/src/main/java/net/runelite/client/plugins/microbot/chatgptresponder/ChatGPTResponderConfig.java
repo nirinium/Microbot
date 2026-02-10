@@ -142,4 +142,15 @@ public interface ChatGPTResponderConfig extends Config {
     default boolean congratulateQuestCompletions() {
         return true;
     }
+
+    @ConfigItem(
+        keyName = "congratulateLevelUps",
+        name = "Congratulate Level Ups",
+        description = "Automatically say 'Gzzz!' when clan members level up",
+        section = behaviorSection,
+        position = 8
+    )
+    default boolean congratulateLevelUps() {
+        return true;
+    }
 }
