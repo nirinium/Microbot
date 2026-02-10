@@ -11,7 +11,7 @@ import javax.inject.Inject;
 import java.awt.*;
 
 @PluginDescriptor(
-        name = PluginDescriptor.Default + "Niri Smelter",
+        name = PluginDescriptor.NIRI + "Niri Smelter",
         description = "All-in-one smelting script that supports any ore and furnace with webwalker integration",
         tags = {"smelting", "smithing", "microbot", "skill"},
         enabledByDefault = false

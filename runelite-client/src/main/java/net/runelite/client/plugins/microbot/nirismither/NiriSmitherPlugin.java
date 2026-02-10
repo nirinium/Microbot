@@ -11,7 +11,7 @@ import javax.inject.Inject;
 import java.awt.*;
 
 @PluginDescriptor(
-        name = PluginDescriptor.Default + "Niri Smither",
+        name = PluginDescriptor.NIRI + "Niri Smither",
         description = "Smiths steel platebodies and other items at various locations",
         tags = {"smithing", "crafting", "microbot", "skill"},
         enabledByDefault = false
