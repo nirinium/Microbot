@@ -79,13 +79,13 @@ public class ChatGPTResponderScript extends Script {
         try {
             if (!Microbot.isLoggedIn()) return;
 
-            // Handle quest completion messages in clan chat
+            // Handle quest and diary completion messages in clan chat
             if (config.congratulateQuestCompletions() && isClanMessage(event.getType())) {
-                if (isQuestCompletion(event.getMessage())) {
+                if (isQuestCompletion(event.getMessage()) || isDiaryCompletion(event.getMessage())) {
                     String gzzVariation = getRandomGzzVariation();
-                    log.info("Quest completed! Responding with: {}", gzzVariation);
+                    log.info("Quest/Diary completed! Responding with: {}", gzzVariation);
                     sleep(Rs2Random.between(500, 1500));
-                    sendPublicMessage(gzzVariation);
+                    sendClanChatMessage(gzzVariation);
                     return;
                 }
             }
@@ -269,6 +269,11 @@ public class ChatGPTResponderScript extends Script {
         return lower.contains("has completed") && lower.contains("quest");
     }
 
+    private boolean isDiaryCompletion(String message) {
+        String lower = message.toLowerCase();
+        return lower.contains("completed") && lower.contains("diary");
+    }
+
     private String getRandomGzzVariation() {
         String[] variations = {
             "Gzzz!",
@@ -283,13 +288,22 @@ public class ChatGPTResponderScript extends Script {
         return variations[Rs2Random.between(0, variations.length - 1)];
     }
 
-    private void sendPublicMessage(String message) {
+    private void sendClanChatMessage(String message) {
+        // Step 1: Hit Enter to open chat box
         Rs2Keyboard.keyPress(KeyEvent.VK_ENTER);
-        sleep(300, 500);
+        sleep(400, 600);
+        
+        // Step 2: Type "/c " to specify clan chat
+        Rs2Keyboard.typeString("/c ");
+        sleep(200, 400);
+        
+        // Step 3: Type the message
         Rs2Keyboard.typeString(message);
         sleep(300, 500);
+        
+        // Step 4: Hit Enter to send the message
         Rs2Keyboard.enter();
-        sleep(200, 300);
+        sleep(200, 400);
     }
 
     @Override
