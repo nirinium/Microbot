@@ -90,6 +90,17 @@ public class ChatGPTResponderScript extends Script {
                 }
             }
 
+            // Handle level up messages in clan chat
+            if (config.congratulateLevelUps() && isClanMessage(event.getType())) {
+                if (isLevelUp(event.getMessage())) {
+                    String gzzVariation = getRandomGzzVariation();
+                    log.info("Level up detected! Responding with: {}", gzzVariation);
+                    sleep(Rs2Random.between(500, 1500));
+                    sendClanChatMessage(gzzVariation);
+                    return;
+                }
+            }
+
             // AI responses require API key
             if (config.apiKey().isEmpty()) return;
 
@@ -272,6 +283,12 @@ public class ChatGPTResponderScript extends Script {
     private boolean isDiaryCompletion(String message) {
         String lower = message.toLowerCase();
         return lower.contains("completed") && lower.contains("diary");
+    }
+
+    private boolean isLevelUp(String message) {
+        String lower = message.toLowerCase();
+        // Matches patterns like "reached level" or "advanced to level"
+        return (lower.contains("level") && (lower.contains("reached") || lower.contains("advanced")));
     }
 
     private String getRandomGzzVariation() {
