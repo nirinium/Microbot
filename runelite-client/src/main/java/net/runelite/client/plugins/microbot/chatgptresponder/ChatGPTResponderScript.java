@@ -308,19 +308,19 @@ public class ChatGPTResponderScript extends Script {
     private void sendClanChatMessage(String message) {
         // Step 1: Hit Enter to open chat box
         Rs2Keyboard.keyPress(KeyEvent.VK_ENTER);
-        sleep(400, 600);
+        sleep(600, 800);
         
-        // Step 2: Type "/c " to specify clan chat
-        Rs2Keyboard.typeString("/c ");
-        sleep(200, 400);
+        // Step 2: Type "//c " or "/ " to specify clan chat (double slash for clan)
+        Rs2Keyboard.typeString("// ");
+        sleep(400, 600);
         
         // Step 3: Type the message
         Rs2Keyboard.typeString(message);
-        sleep(300, 500);
+        sleep(500, 700);
         
         // Step 4: Hit Enter to send the message
         Rs2Keyboard.enter();
-        sleep(200, 400);
+        sleep(400, 600);
     }
 
     @Override
