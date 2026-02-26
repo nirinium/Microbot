@@ -405,10 +405,11 @@ public class Rs2Npc {
      */
     public static Stream<Rs2NpcModel> getAttackableNpcs(boolean reachable) {
         Rs2WorldPoint playerLocation = new Rs2WorldPoint(Microbot.getClient().getLocalPlayer().getWorldLocation());
+        boolean isInstanced = Microbot.getClient().isInInstancedRegion();
 
         return getNpcs(npc -> npc.getCombatLevel() > 0
                 && !npc.isDead()
-                && (!reachable || playerLocation.distanceToPath(npc.getWorldLocation()) < Integer.MAX_VALUE)
+                && (!reachable || isInstanced || playerLocation.distanceToPath(npc.getWorldLocation()) < Integer.MAX_VALUE)
                 && (!npc.isInteracting() || Objects.equals(npc.getInteracting(), Microbot.getClient().getLocalPlayer())))
                 .sorted(Comparator.comparingInt(value ->
                         value.getLocalLocation().distanceTo(

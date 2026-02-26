@@ -15,7 +15,7 @@ public class SailingScript extends Script {
     private final SailingConfig config;
     private final SalvagingScript salvagingFeature;
     private final TrialsScript trialsFeature;
-
+*
 	@Inject
 	public SailingScript(SailingConfig config, SalvagingScript salvagingFeature, TrialsScript trialsFeature) {
 		this.config = config;
