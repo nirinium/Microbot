@@ -110,6 +110,13 @@ public class SireScript extends Script {
             VENT_STAND_NW, VENT_STAND_NE, VENT_STAND_W, VENT_STAND_E
     };
 
+    // Prescribed vent attack order:
+    // 1. Right side top (NE)  2. Right side lower (E)  3. Left side bottom (W)  4. Left side top/closest to boss (NW)
+    // Each entry is the STAND TILE from which to range the corresponding vent.
+    private static final WorldPoint[] VENT_ATTACK_ORDER = {
+            VENT_STAND_NE, VENT_STAND_E, VENT_STAND_W, VENT_STAND_NW
+    };
+
     // ── State ────────────────────────────────────────────
     @Getter
     @Setter
@@ -307,6 +314,23 @@ public class SireScript extends Script {
         explosionHappened = true;
         postExplosionMiasmaCount = 0;
         log("Explosion teleport detected — dodge queued! Post-explosion tracking started.");
+        // Pre-emptively send walk command to Row 3 from the event thread.
+        // The main loop will also spam-click, but this shaves off up to 100ms
+        // (the main loop polls at 100ms intervals).
+        try {
+            Player p = Microbot.getClient().getLocalPlayer();
+            if (p != null) {
+                // Pick closest Row 3 tile and fire walk immediately
+                WorldPoint target = p.getWorldLocation().distanceTo(ROW3_LEFT)
+                        <= p.getWorldLocation().distanceTo(ROW3_RIGHT) ? ROW3_LEFT : ROW3_RIGHT;
+                LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), target);
+                if (local != null) {
+                    Rs2Walker.walkFastLocal(local);
+                }
+            }
+        } catch (Exception e) {
+            // Non-critical — main loop will handle the dodge
+        }
     }
 
     /**
@@ -403,39 +427,31 @@ public class SireScript extends Script {
 
         // ── 1. CRITICAL: Phase 3 explosion dodge ──
         // The Sire teleports the player to Row 2, then the explosion triggers.
-        // We must spam-click Row 3 IMMEDIATELY — no delay. The explosion damage
-        // hits based on your tile when it resolves, not on a fixed timer.
+        // We must SPAM-CLICK Row 3 with zero delay. This is the highest priority action.
         // GOAL: be at least 3 tiles away from Sire, preferably on Row 3.
         if (explosionIncoming) {
             status = "Dodging explosion — run to Row 3!";
             state = SireState.DODGING_EXPLOSION;
-            // Pick Row 3 left or right — doesn't matter which, just get there fast.
             WorldPoint target = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
-            // Immediately walk to Row 3 — don't sleep before moving.
+            // Triple-click with zero gap — the walk invoke is instant (menu action)
+            // First click may be eaten by the teleport animation; second/third guarantee movement.
             walkToSafe(target);
-            sleep(100);
-            walkToSafe(target); // spam-click to ensure the walk registers
-            // Wait until we arrive on Row 3
+            walkToSafe(target);
+            walkToSafe(target);
+            // Ultra-fast poll: 50ms intervals. Row 3 is only 2 tiles from Row 2.
+            // Player should arrive within 1-2 game ticks (600-1200ms).
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
-                return p != null && p.getWorldLocation().distanceTo(target) <= 1;
-            }, 1800);
-            // Verify we are at least 3 tiles from the Sire
-            Rs2NpcModel sireNow = findSire();
-            if (sireNow != null) {
-                Player afterDodge = Microbot.getClient().getLocalPlayer();
-                if (afterDodge != null) {
-                    int distToSire = afterDodge.getWorldLocation().distanceTo(sireNow.getWorldLocation());
-                    if (distToSire < 3) {
-                        // Still too close — run further south
-                        log("Explosion dodge: only " + distToSire + " tiles from Sire, moving further south");
-                        dodgeSouth(afterDodge, 4);
-                    }
+                if (p == null) return false;
+                // Keep spam-clicking every poll cycle until we arrive
+                if (p.getWorldLocation().distanceTo(target) > 1) {
+                    walkToSafe(target);
+                    return false;
                 }
-            }
+                return true;
+            }, 1200);
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
-            // Stay on Row 3 — handlePhase3() will walk back to Row 2 after safety window.
             return;
         }
 
@@ -605,7 +621,7 @@ public class SireScript extends Script {
             }
         }
 
-        // ── Equip Scorching bow ──
+        // ── Equip Scorching bow (only if not already equipped) ──
         String bow = config.scorchingBow();
         if (!bow.isEmpty() && !Rs2Equipment.isWearing(bow)) {
             status = "Equipping " + bow;
@@ -613,11 +629,10 @@ public class SireScript extends Script {
                 log("WARNING: " + bow + " not in inventory!");
                 return;
             }
-            if (tickSleep()) return;
-            sleepUntil(() -> Rs2Equipment.isWearing(config.scorchingBow()), 1200);
+            sleepUntil(() -> Rs2Equipment.isWearing(config.scorchingBow()), 600);
         }
 
-        // ── Find ALL alive lungs, sorted by proximity ──
+        // ── Find ALL alive lungs ──
         List<Rs2NpcModel> aliveLungs = Rs2Npc.getNpcs(LUNG)
                 .filter(l -> !l.isDead())
                 .collect(Collectors.toList());
@@ -626,9 +641,6 @@ public class SireScript extends Script {
             // Check for dying lungs too — they may still be transitioning
             boolean hasDying = Rs2Npc.getNpcs(LUNG_DYING).findAny().isPresent();
             if (ventsDestroyed >= 4 || (!hasDying && ventsDestroyed > 0)) {
-                // All vents destroyed — attack Sire during transition to Phase 2
-                // Wiki: "head back to the centre and attack the Sire as soon as it steps out"
-                // Damage is reduced by 50% but the transition time is long enough to deal some
                 handlePhase1Transition(player, sire);
                 return;
             }
@@ -636,57 +648,55 @@ public class SireScript extends Script {
             return;
         }
 
-        // Pick the nearest alive lung
-        Rs2NpcModel targetLung = aliveLungs.get(0);
+        // Pick the lung to attack based on prescribed order.
+        Rs2NpcModel targetLung = pickNextLungInOrder(aliveLungs);
+        if (targetLung == null) targetLung = aliveLungs.get(0);
 
         status = "Destroying vent " + (ventsDestroyed + 1) + "/4";
         state = SireState.DESTROYING_VENTS;
 
         // ── Position on a vent stand-tile within 10-range of the target lung ──
-        // Wiki: "The other marked tiles show useful spots to hit the respiratory
-        //        systems from with a 10-range weapon."
-        // Pick the vent stand-tile closest to the TARGET LUNG that is within 10 range,
-        // so we guarantee we can actually hit it from where we stand.
+        // Move FAST — no unnecessary waits. The walk invoke is instant;
+        // we only need a brief wait to confirm arrival.
         WorldPoint lungLoc = targetLung.getWorldLocation();
         int distToLung = player.getWorldLocation().distanceTo(lungLoc);
         if (distToLung > 10) {
             WorldPoint bestStand = bestVentStandForLung(lungLoc);
             if (bestStand != null) {
-                status = "Moving to vent stand-tile for vent " + (ventsDestroyed + 1);
                 walkToSafe(bestStand);
+                // Fast poll — 100ms intervals, 2s max
                 sleepUntil(() -> {
                     Player p = Microbot.getClient().getLocalPlayer();
                     return p != null && p.getWorldLocation().distanceTo(bestStand) <= 1;
-                }, 3000);
+                }, 2000);
             } else {
-                // No vent stand-tile is within 10 range — walk closer to the lung directly
-                log("WARNING: No vent stand-tile within 10 range of lung at " + lungLoc);
                 walkToSafe(lungLoc);
                 sleepUntil(() -> {
                     Player p = Microbot.getClient().getLocalPlayer();
                     return p != null && p.getWorldLocation().distanceTo(lungLoc) <= 10;
-                }, 3000);
+                }, 2000);
             }
         }
 
-        // Attack the lung — Scorching bow 1-shots respiratory systems
+        // ── Attack the lung immediately — no tickSleep after interact ──
+        // Scorching bow 1-shots respiratory systems. Fire and move on.
         Rs2Npc.interact(targetLung, "attack");
-        if (tickSleep()) return;
 
-        // Wait for THIS specific vent to be destroyed.
-        // Scorching bow should 1-shot; 6s timeout is safe (stun-expiry check exits early).
+        // Fast-poll for vent destruction. 100ms intervals for near tick-perfect response.
         final int ventsBefore = ventsDestroyed;
+        final Rs2NpcModel nextLung = targetLung; // reference for re-attack
         sleepUntil(() -> {
             if (explosionIncoming || miasmaIncoming) return true;
-            // Break out if stun is about to expire — need to re-stun
             if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
             return ventsDestroyed > ventsBefore;
         }, () -> {
-            Rs2Player.eatAt(config.eatAtHpPercent());
-            // Re-attack if we stopped interacting (e.g., after eating or out of range)
+            // Only eat if actually low — don't waste time otherwise
+            if (getHpPercent() <= config.eatAtHpPercent()) {
+                Rs2Player.eatAt(config.eatAtHpPercent());
+            }
+            // Re-attack if stopped interacting
             Player p = Microbot.getClient().getLocalPlayer();
             if (p != null && !p.isInteracting()) {
-                // Re-find nearest alive lung — the targeted one might have died
                 List<Rs2NpcModel> remaining = Rs2Npc.getNpcs(LUNG)
                         .filter(l -> !l.isDead())
                         .collect(Collectors.toList());
@@ -694,11 +704,14 @@ public class SireScript extends Script {
                     Rs2Npc.interact(remaining.get(0), "attack");
                 }
             }
-        }, 6000, 600);
+        }, 4000, 100); // 100ms poll interval for near tick-perfect
 
-        // Drink potions between vents
-        drinkPrayerPotion();
-        Rs2Player.eatAt(config.eatAtHpPercent());
+        // Don't drink potions between every vent — only if prayer is very low
+        int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
+                / Math.max(1, Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
+        if (prayerPercent < 15) {
+            drinkPrayerPotion();
+        }
     }
 
     /**
@@ -938,22 +951,19 @@ public class SireScript extends Script {
             status = "Phase 3 — dodging explosion!";
             state = SireState.DODGING_EXPLOSION;
             WorldPoint target = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
+            // Spam-click with no delays
             walkToSafe(target);
-            sleep(100);
+            walkToSafe(target);
             walkToSafe(target);
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
-                return p != null && p.getWorldLocation().distanceTo(target) <= 1;
-            }, 1800);
-            // Verify 3+ tiles from Sire
-            Player afterDodge = Microbot.getClient().getLocalPlayer();
-            if (afterDodge != null) {
-                int distToSire = afterDodge.getWorldLocation().distanceTo(sire.getWorldLocation());
-                if (distToSire < 3) {
-                    log("P3 explosion dodge: only " + distToSire + " tiles from Sire, moving further");
-                    dodgeSouth(afterDodge, 4);
+                if (p == null) return false;
+                if (p.getWorldLocation().distanceTo(target) > 1) {
+                    walkToSafe(target);
+                    return false;
                 }
-            }
+                return true;
+            }, 1200);
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
             return;
@@ -976,14 +986,21 @@ public class SireScript extends Script {
 
         // ── Phase 3 low-HP safety retreat ──
         // Wiki: "If the player's health drops below 40, they should run away for a brief respite."
+        // IMPORTANT: In P3, NEVER leave Row 2/Row 3 boundaries — tentacles do huge damage.
+        // Retreat to Row 3 (safe from tentacles) and eat there.
         int currentHp = Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS);
         if (currentHp > 0 && currentHp < config.phase3RetreatHp()) {
             boolean hasHealing = hasHealingSupplies();
             if (hasHealing) {
-                status = "Phase 3 — retreating to eat! (HP: " + currentHp + ")";
+                status = "Phase 3 — retreating to Row 3 to eat! (HP: " + currentHp + ")";
                 state = SireState.RETREATING;
-                // Run south to get briefly out of scion range
-                dodgeSouth(player, 4);
+                // Retreat to Row 3 — safe from tentacles and far enough from Sire
+                WorldPoint retreatTarget = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
+                if (miasmaPools.contains(retreatTarget)) {
+                    retreatTarget = retreatTarget.equals(ROW3_LEFT) ? ROW3_RIGHT : ROW3_LEFT;
+                }
+                walkToSafe(retreatTarget);
+                sleep(600);
                 Rs2Player.eatAt(100); // eat up as much as possible
                 tickSleep();
                 Rs2Player.eatAt(100);
@@ -1163,14 +1180,20 @@ public class SireScript extends Script {
         boolean specEquipped = Rs2Equipment.isWearing(dmgWeapon);
         if (!specEquipped && !Rs2Inventory.hasItem(dmgWeapon)) return false;
 
-        // Ensure close enough to melee
+        // Ensure close enough to melee — but NEVER walk north of Row 2 in P3
+        // (tentacles do huge damage). Stay on Row 2 and let the Sire come to us.
         Player player = Microbot.getClient().getLocalPlayer();
         if (player != null) {
             int npcSize = sire.getComposition() != null ? sire.getComposition().getSize() : 3;
             int dist = player.getWorldLocation().distanceTo(sire.getWorldLocation());
             if (dist > npcSize) {
-                status = "Phase 3 — closing for damage spec";
-                Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), sire.getWorldLocation()));
+                // In Phase 3, don't walk toward Sire — stay on Row 2 and wait
+                status = "Phase 3 — waiting for Sire to be in range for damage spec";
+                WorldPoint row2 = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
+                int distToRow2 = player.getWorldLocation().distanceTo(row2);
+                if (distToRow2 > 2) {
+                    walkToSafe(row2);
+                }
                 tickSleep();
                 return true;
             }
@@ -1236,14 +1259,16 @@ public class SireScript extends Script {
                 WorldPoint r2 = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
                 walkToSafe(r2);
             }
-        } else if (currentPhase == 2 && sirePanicking) {
+            } else if (currentPhase == 2 && sirePanicking) {
             // Phase 2 panicking: swap between Row 2 left/right
             WorldPoint current = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
             WorldPoint other = current.equals(ROW2_LEFT) ? ROW2_RIGHT : ROW2_LEFT;
             if (!miasmaPools.contains(other)) {
                 walkToSafe(other);
             } else {
-                walkToSafe(new WorldPoint(loc.getX() + 3, loc.getY(), loc.getPlane()));
+                // Both Row 2 tiles contaminated — go to Row 3 briefly
+                WorldPoint r3 = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
+                walkToSafe(r3);
             }
         } else if (currentPhase == 3) {
             // Phase 3: "run back and forth on Row 2 while attacking"
@@ -1260,9 +1285,10 @@ public class SireScript extends Script {
                 } else if (!miasmaPools.contains(current) && player.getWorldLocation().distanceTo(current) > 1) {
                     walkToSafe(current);
                 } else {
-                    // Row 3 fully contaminated — fall back south
-                    walkToSafe(new WorldPoint(loc.getX(), loc.getY() - 3, loc.getPlane()));
-                }
+                // Row 3 fully contaminated — swap to other Row 3 tile or stay put
+                WorldPoint otherR3 = current.equals(ROW3_LEFT) ? ROW3_RIGHT : ROW3_LEFT;
+                walkToSafe(otherR3);
+            }
             } else {
                 // Normal P3: dodge between Row 2 left/right
                 WorldPoint current = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
@@ -1287,21 +1313,30 @@ public class SireScript extends Script {
 
     /**
      * Generic dodge — move to the nearest safe tile.
-     * Prefers known safe row tiles over random offsets.
+     * In Phase 3, ONLY use Row 2/Row 3 tiles to avoid tentacle damage.
      * Miasma is 3x3: center does 10-30/tick, outer does 2-8/tick.
      */
     private void dodgeMiasma(Player player) {
         WorldPoint loc = player.getWorldLocation();
-        // Prefer safe row tiles, plus nearby offsets as fallback
-        WorldPoint[] candidates = {
-                closestOf(player, ROW1_LEFT, ROW1_RIGHT),
-                closestOf(player, ROW2_LEFT, ROW2_RIGHT),
-                STUN_TILE,
-                new WorldPoint(loc.getX() + 3, loc.getY(), loc.getPlane()),
-                new WorldPoint(loc.getX() - 3, loc.getY(), loc.getPlane()),
-                new WorldPoint(loc.getX(), loc.getY() + 3, loc.getPlane()),
-                new WorldPoint(loc.getX(), loc.getY() - 3, loc.getPlane()),
-        };
+        WorldPoint[] candidates;
+
+        if (currentPhase == 3) {
+            // Phase 3: STRICTLY Row 2 and Row 3 only — tentacles hit everywhere else
+            candidates = new WorldPoint[] {
+                    ROW2_LEFT, ROW2_RIGHT, ROW3_LEFT, ROW3_RIGHT
+            };
+        } else {
+            // Other phases: prefer safe row tiles, plus nearby offsets as fallback
+            candidates = new WorldPoint[] {
+                    closestOf(player, ROW1_LEFT, ROW1_RIGHT),
+                    closestOf(player, ROW2_LEFT, ROW2_RIGHT),
+                    STUN_TILE,
+                    new WorldPoint(loc.getX() + 3, loc.getY(), loc.getPlane()),
+                    new WorldPoint(loc.getX() - 3, loc.getY(), loc.getPlane()),
+                    new WorldPoint(loc.getX(), loc.getY() + 3, loc.getPlane()),
+                    new WorldPoint(loc.getX(), loc.getY() - 3, loc.getPlane()),
+            };
+        }
 
         WorldPoint best = pickBestTile(candidates);
         walkToSafe(best);
@@ -1591,6 +1626,38 @@ public class SireScript extends Script {
             }
         }
         return best;
+    }
+
+    /**
+     * Pick the next lung to attack following the prescribed order:
+     * 1. Right side top (nearest to NE stand)
+     * 2. Right side lower (nearest to E stand)
+     * 3. Left side bottom (nearest to W stand)
+     * 4. Left side top / closest to boss (nearest to NW stand)
+     *
+     * We iterate through VENT_ATTACK_ORDER and return the first alive lung
+     * that is closest to that stand-tile. This ensures we attack in the
+     * correct order even if NPC positions vary slightly.
+     */
+    private Rs2NpcModel pickNextLungInOrder(List<Rs2NpcModel> aliveLungs) {
+        for (WorldPoint standTile : VENT_ATTACK_ORDER) {
+            Rs2NpcModel closest = null;
+            int closestDist = Integer.MAX_VALUE;
+            for (Rs2NpcModel lung : aliveLungs) {
+                int d = lung.getWorldLocation().distanceTo(standTile);
+                if (d < closestDist) {
+                    closestDist = d;
+                    closest = lung;
+                }
+            }
+            // If a lung is reasonably close to this stand-tile (within 12 tiles), pick it.
+            // This means this quadrant's vent is still alive — attack it now.
+            if (closest != null && closestDist <= 12) {
+                return closest;
+            }
+        }
+        // Fallback: return any alive lung
+        return aliveLungs.isEmpty() ? null : aliveLungs.get(0);
     }
 
     /**
