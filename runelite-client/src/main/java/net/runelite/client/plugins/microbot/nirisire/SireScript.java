@@ -100,10 +100,13 @@ public class SireScript extends Script {
     private static final WorldPoint ROW3_LEFT = new WorldPoint(2969, 4770, SW_PLANE);
     private static final WorldPoint ROW3_RIGHT = new WorldPoint(2971, 4770, SW_PLANE);
 
-    // Explosion dodge: always go straight south, not left/right.
-    // Minimum Y coordinate in the arena (south wall).
-    private static final int ARENA_MIN_Y = 4768;
-    private static final int EXPLOSION_DODGE_SOUTH_TILES = 3;
+    // Explosion dodge: player is always teleported to western tile of Row 2.
+    // Wiki: "The Sire teleports the player to the western tile of Row 2.
+    //        Two ticks later it explodes, dealing up to 96 damage if the
+    //        player is within the blast radius."
+    // Dodge target is always ROW3_LEFT (same X, 2 tiles south).
+    private static final WorldPoint EXPLOSION_TELEPORT_LANDING = ROW2_LEFT; // (2969, 4772)
+    private static final WorldPoint EXPLOSION_DODGE_TARGET = ROW3_LEFT;     // (2969, 4770)
 
     // Vent stand-tiles: optimal positions to hit respiratory systems with a 10-range weapon.
     // Derived from unlabelled wiki tile markers in the SW room (regionId 11850).
@@ -310,26 +313,26 @@ public class SireScript extends Script {
 
     /**
      * Called when Phase 3 explosion teleport is detected.
-     * Sets the dodge flag — the actual walk happens in the main loop AFTER
-     * the teleport completes (walking before teleport gets cancelled).
-     * Marks explosion as having happened for post-explosion miasma tracking.
+     * Wiki: Player is always teleported to the western tile of Row 2 (2969, 4772).
+     * Two ticks later the explosion fires. Spam-click Row 3 immediately.
+     *
+     * Since we know the exact landing tile, we can pre-walk to ROW3_LEFT
+     * immediately from the event thread. Even if the teleport hasn't visually
+     * resolved yet, the walk command will queue and execute as soon as the
+     * player lands.
      */
     public void onExplosionTeleport() {
         explosionIncoming = true;
         explosionHappened = true;
         postExplosionMiasmaCount = 0;
-        log("Explosion teleport detected — dodge queued! Post-explosion tracking started.");
-        // Pre-emptively send walk command straight south from the event thread.
-        // The main loop will also spam-click, but this shaves off up to 100ms.
+        log("Explosion teleport detected — spam-click Row 3! (target: " + EXPLOSION_DODGE_TARGET + ")");
+        // Pre-emptively walk to ROW3_LEFT from the event thread.
+        // We know the player will land at ROW2_LEFT, so ROW3_LEFT (2 tiles south)
+        // is always the correct target. Fire it now to shave off main-loop latency.
         try {
-            Player p = Microbot.getClient().getLocalPlayer();
-            if (p != null) {
-                // Go straight south (same X, Y-3) — fastest escape path
-                WorldPoint target = dodgeSouthTarget(p.getWorldLocation());
-                LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), target);
-                if (local != null) {
-                    Rs2Walker.walkFastLocal(local);
-                }
+            LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), EXPLOSION_DODGE_TARGET);
+            if (local != null) {
+                Rs2Walker.walkFastLocal(local);
             }
         } catch (Exception e) {
             // Non-critical — main loop will handle the dodge
@@ -429,30 +432,27 @@ public class SireScript extends Script {
         }
 
         // ── 1. CRITICAL: Phase 3 explosion dodge ──
-        // The Sire teleports the player adjacent to itself, then the explosion fires.
-        // We must go STRAIGHT SOUTH (same X, Y-3) — not to fixed left/right tiles.
-        // Straight south is the fastest path since it requires no lateral movement.
+        // Wiki: Player is teleported to western tile of Row 2 (2969, 4772).
+        // Two ticks later explosion fires dealing up to 96 damage.
+        // Dodge target is ALWAYS ROW3_LEFT (2969, 4770) — 2 tiles straight south.
+        // "As soon as the teleport occurs, spam-click on Row 3 to avoid the attack."
         if (explosionIncoming) {
-            status = "Dodging explosion — running south!";
+            status = "Dodging explosion — spam-clicking Row 3!";
             state = SireState.DODGING_EXPLOSION;
-            WorldPoint target = dodgeSouthTarget(player.getWorldLocation());
-            // Triple-click with zero gap — the walk invoke is instant (menu action)
-            walkToSafe(target);
-            walkToSafe(target);
-            walkToSafe(target);
-            // Ultra-fast poll: spam-click south every cycle until we arrive
+            log("Explosion dodge: player at " + player.getWorldLocation() + " → target " + EXPLOSION_DODGE_TARGET);
+            // Spam-click the known safe tile with zero gap
+            walkToSafe(EXPLOSION_DODGE_TARGET);
+            walkToSafe(EXPLOSION_DODGE_TARGET);
+            walkToSafe(EXPLOSION_DODGE_TARGET);
+            // Keep spam-clicking until we arrive (only 2 tiles, should be <1 game tick)
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
-                // Recalculate target from CURRENT position each poll cycle.
-                // This handles the case where the teleport lands us in a different spot
-                // than where we were when we first calculated.
-                WorldPoint freshTarget = dodgeSouthTarget(p.getWorldLocation());
-                if (p.getWorldLocation().distanceTo(freshTarget) > 0) {
-                    walkToSafe(freshTarget);
-                    return false;
+                if (p.getWorldLocation().distanceTo(EXPLOSION_DODGE_TARGET) <= 1) {
+                    return true;
                 }
-                return true;
+                walkToSafe(EXPLOSION_DODGE_TARGET);
+                return false;
             }, 1800);
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
@@ -707,30 +707,27 @@ public class SireScript extends Script {
             if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
             return ventsDestroyed > ventsBefore;
         }, () -> {
-            // Re-attack if we stopped interacting — the shot may not have fired
+            // Re-attack if we stopped interacting — the shot may not have fired.
+            // IMPORTANT: Do NOT send walk commands here. If the player is walking
+            // toward the lung to attack, isInteracting() may be false during the
+            // walk phase. Sending a walk-to-stand-tile would fight the game's
+            // own pathfinding and cause bouncing.
             Player p = Microbot.getClient().getLocalPlayer();
-            if (p != null && !p.isInteracting()) {
-                // Make sure the lung is still alive before re-attacking
+            if (p == null) return;
+            // Only re-attack if player is truly idle (not animating, not moving)
+            boolean isMoving = p.getPoseAnimation() != p.getIdlePoseAnimation();
+            if (!p.isInteracting() && !isMoving && p.getAnimation() == -1) {
                 List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
                         .filter(l -> !l.isDead())
                         .collect(Collectors.toList());
                 if (!stillAlive.isEmpty()) {
-                    // Pick the closest alive lung (might be the same one or a different one)
+                    // Just re-attack — let the game handle walking into range
                     Rs2NpcModel closest = stillAlive.stream()
                             .min(Comparator.comparingInt(l ->
                                     p.getWorldLocation().distanceTo(l.getWorldLocation())))
                             .orElse(null);
                     if (closest != null) {
-                        // Check if we're in range before re-attacking
-                        if (p.getWorldLocation().distanceTo(closest.getWorldLocation()) <= 10) {
-                            Rs2Npc.interact(closest, "attack");
-                        } else {
-                            // Walk closer
-                            WorldPoint stand = bestVentStandForLung(closest.getWorldLocation());
-                            if (stand != null) {
-                                walkToSafe(stand);
-                            }
-                        }
+                        Rs2Npc.interact(closest, "attack");
                     }
                 }
             }
@@ -1038,25 +1035,23 @@ public class SireScript extends Script {
             if (tickSleep()) return;
         }
 
-        // ── CRITICAL: Explosion dodge (handled in main loop, but double-check here) ──
-        // Go STRAIGHT SOUTH from current position (same X, Y-3).
+        // ── CRITICAL: Explosion dodge (backup check inside handlePhase3) ──
+        // Same logic as main loop: spam-click ROW3_LEFT.
         if (explosionIncoming) {
-            status = "Phase 3 — dodging explosion south!";
+            status = "Phase 3 — dodging explosion to Row 3!";
             state = SireState.DODGING_EXPLOSION;
-            WorldPoint target = dodgeSouthTarget(player.getWorldLocation());
-            // Spam-click with no delays
-            walkToSafe(target);
-            walkToSafe(target);
-            walkToSafe(target);
+            log("P3 handlePhase3 explosion dodge: player at " + player.getWorldLocation() + " → " + EXPLOSION_DODGE_TARGET);
+            walkToSafe(EXPLOSION_DODGE_TARGET);
+            walkToSafe(EXPLOSION_DODGE_TARGET);
+            walkToSafe(EXPLOSION_DODGE_TARGET);
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
-                WorldPoint freshTarget = dodgeSouthTarget(p.getWorldLocation());
-                if (p.getWorldLocation().distanceTo(freshTarget) > 0) {
-                    walkToSafe(freshTarget);
-                    return false;
+                if (p.getWorldLocation().distanceTo(EXPLOSION_DODGE_TARGET) <= 1) {
+                    return true;
                 }
-                return true;
+                walkToSafe(EXPLOSION_DODGE_TARGET);
+                return false;
             }, 1800);
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
@@ -1705,14 +1700,13 @@ public class SireScript extends Script {
     }
 
     /**
-     * Calculate the explosion dodge target: straight south from current position.
-     * Same X, Y minus EXPLOSION_DODGE_SOUTH_TILES, clamped to ARENA_MIN_Y.
-     * This is faster than walking to fixed left/right tiles because it requires
-     * no lateral movement — the player goes in a straight line.
+     * No longer needed — explosion dodge now uses the hardcoded EXPLOSION_DODGE_TARGET
+     * (ROW3_LEFT) since the wiki confirms the player always lands on western Row 2.
+     * Kept as a fallback utility in case any other code references it.
      */
+    @SuppressWarnings("unused")
     private WorldPoint dodgeSouthTarget(WorldPoint current) {
-        int targetY = Math.max(current.getY() - EXPLOSION_DODGE_SOUTH_TILES, ARENA_MIN_Y);
-        return new WorldPoint(current.getX(), targetY, current.getPlane());
+        return EXPLOSION_DODGE_TARGET;
     }
 
     /**
