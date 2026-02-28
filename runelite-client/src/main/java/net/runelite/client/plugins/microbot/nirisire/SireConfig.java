@@ -1,16 +1,16 @@
-package net.runelite.client.plugins.microbot.niriaraxxor;
+package net.runelite.client.plugins.microbot.nirisire;
 
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
-import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
+import net.runelite.client.plugins.microbot.niriaraxxor.CombatPotionType;
 
-@ConfigGroup(AraxxorConfig.GROUP)
-public interface AraxxorConfig extends Config {
+@ConfigGroup(SireConfig.GROUP)
+public interface SireConfig extends Config {
 
-    String GROUP = "niriaraxxor";
+    String GROUP = "nirisire";
 
     // ── Sections ────────────────────────────────────────
     @ConfigSection(name = "Combat", description = "Combat settings", position = 0)
@@ -37,18 +37,43 @@ public interface AraxxorConfig extends Config {
             position = -1
     )
     default String GUIDE() {
-        return "1. Requires Slayer task (Araxyte or spider)\n"
-                + "2. Start at the Morytania Spider Cave entrance or a bank\n"
-                + "3. Use crush weapons (Scythe, Inquisitor's Mace, Bludgeon)\n"
-                + "4. Bring extended anti-venom+, prayer pots, super/divine super combat, food\n"
-                + "5. Optional: Elder maul for Defence drain special attack";
+        return "1. Requires Slayer task (Abyssal demon or boss task)\n"
+                + "2. Start in the Sire's arena (SW room preferred)\n"
+                + "3. Ancient spellbook required for Shadow Barrage stun\n"
+                + "4. Bring Scorching bow + any arrows for Phase 1 vents (1-shots them)\n"
+                + "5. Bring melee weapon (Emberlight/Fang recommended) for Phase 2-3\n"
+                + "6. Optional: Defence drain spec (DWH/Elder maul) at Phase 2 start\n"
+                + "7. Optional: Damage spec (Burning claws/Dragon claws) for Phase 3\n"
+                + "8. Bring prayer pots, combat pots, anti-poison, food";
+    }
+
+    @ConfigItem(
+            keyName = "mainWeapon",
+            name = "Main weapon name",
+            description = "Melee weapon for Phase 2-3 (e.g. Abyssal bludgeon, Inquisitor's mace)",
+            position = 0,
+            section = combatSection
+    )
+    default String mainWeapon() {
+        return "Abyssal bludgeon";
+    }
+
+    @ConfigItem(
+            keyName = "mainShield",
+            name = "Shield/offhand name",
+            description = "Shield or defender to wield with main weapon (leave blank for 2H)",
+            position = 1,
+            section = combatSection
+    )
+    default String mainShield() {
+        return "";
     }
 
     @ConfigItem(
             keyName = "useSpecialAttack",
-            name = "Use spec for Defence drain",
-            description = "Use Elder Maul / DWH spec at start of fight to drain Defence",
-            position = 0,
+            name = "Use Defence drain spec (P2)",
+            description = "Use Elder Maul / DWH spec at start of Phase 2 to drain Defence",
+            position = 2,
             section = combatSection
     )
     default boolean useSpecialAttack() {
@@ -57,9 +82,9 @@ public interface AraxxorConfig extends Config {
 
     @ConfigItem(
             keyName = "specWeapon",
-            name = "Spec weapon name",
-            description = "Name of the special attack weapon (e.g. Elder maul, Dragon warhammer)",
-            position = 1,
+            name = "Defence spec weapon",
+            description = "Name of the defence drain spec weapon (e.g. Elder maul, Dragon warhammer)",
+            position = 3,
             section = combatSection
     )
     default String specWeapon() {
@@ -68,9 +93,9 @@ public interface AraxxorConfig extends Config {
 
     @ConfigItem(
             keyName = "specCount",
-            name = "Spec hit count",
-            description = "Number of spec hits to perform at the start of the fight (e.g. 2 for dual elder maul)",
-            position = 2,
+            name = "Defence spec count",
+            description = "Number of defence drain spec hits to perform at the start of Phase 2",
+            position = 4,
             section = combatSection
     )
     @Range(min = 1, max = 2)
@@ -79,111 +104,57 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "useSurgePotion",
-            name = "Use surge potion",
-            description = "Drink a surge potion after all spec hits land for the special attack energy boost",
-            position = 3,
-            section = combatSection
-    )
-    default boolean useSurgePotion() {
-        return false;
-    }
-
-    @ConfigItem(
-            keyName = "mainWeapon",
-            name = "Main weapon name",
-            description = "Name of main weapon to wield after spec (e.g. Inquisitor's mace)",
-            position = 4,
-            section = combatSection
-    )
-    default String mainWeapon() {
-        return "Inquisitor's mace";
-    }
-
-    @ConfigItem(
-            keyName = "mainShield",
-            name = "Shield/offhand name",
-            description = "Shield or defender to wield with main weapon (leave blank for 2H)",
+            keyName = "useDamageSpec",
+            name = "Use damage spec (P3)",
+            description = "Use Burning claws / Dragon claws spec during Phase 3 for fast finishing",
             position = 5,
             section = combatSection
     )
-    default String mainShield() {
-        return "";
+    default boolean useDamageSpec() {
+        return true;
     }
 
     @ConfigItem(
-            keyName = "araxyteSwitchWeapon",
-            name = "Araxyte kill weapon",
-            description = "Weapon for killing araxyte minions (Noxious halberd recommended for guaranteed max hits)",
+            keyName = "damageSpecWeapon",
+            name = "Damage spec weapon",
+            description = "Name of the damage spec weapon for Phase 3 (e.g. Burning claws, Dragon claws, Voidwaker)",
             position = 6,
             section = combatSection
     )
-    default String araxyteSwitchWeapon() {
-        return "Noxious halberd";
+    default String damageSpecWeapon() {
+        return "Burning claws";
     }
 
     @ConfigItem(
-            keyName = "killAcidicAraxytes",
-            name = "Kill acidic araxytes",
-            description = "Kill acidic (green) araxytes or ignore them and tank",
+            keyName = "damageSpecCost",
+            name = "Damage spec cost (%)",
+            description = "Special attack energy cost per hit for the damage spec weapon",
             position = 7,
             section = combatSection
     )
-    default boolean killAcidicAraxytes() {
-        return true;
+    @Range(min = 25, max = 100)
+    default int damageSpecCost() {
+        return 50;
     }
 
     @ConfigItem(
-            keyName = "lureRupturaToAraxxor",
-            name = "Lure ruptura to Araxxor",
-            description = "Lure red (ruptura) araxytes to explode under Araxxor for extra damage",
+            keyName = "scorchingBow",
+            name = "Scorching bow name",
+            description = "Scorching bow 1-shots all respiratory vents; works with full melee gear",
             position = 8,
             section = combatSection
     )
-    default boolean lureRupturaToAraxxor() {
-        return true;
-    }
-
-    @ConfigItem(
-            keyName = "useThralls",
-            name = "Use Thralls",
-            description = "Summon a thrall using the Arceuus spellbook (requires Book of the Dead and runes)",
-            position = 9,
-            section = combatSection
-    )
-    default boolean useThralls() {
-        return false;
-    }
-
-    @ConfigItem(
-            keyName = "thrallType",
-            name = "Thrall type",
-            description = "Which type of thrall to summon (Magic = ghost, Ranged = skeleton, Melee = zombie)",
-            position = 10,
-            section = combatSection
-    )
-    default ThrallType thrallType() {
-        return ThrallType.MELEE;
+    default String scorchingBow() {
+        return "Scorching bow";
     }
 
     // ── Prayer ──────────────────────────────────────────
 
     @ConfigItem(
-            keyName = "usePiety",
-            name = "Use Piety",
-            description = "Activate Piety during fight (requires 70 Prayer & Defence)",
-            position = 0,
-            section = prayerSection
-    )
-    default boolean usePiety() {
-        return true;
-    }
-
-    @ConfigItem(
             keyName = "protectFromMelee",
-            name = "Protect from Melee",
-            description = "Use Protect from Melee when in melee range (reduces damage from 38 to 5)",
-            position = 1,
+            name = "Protect from Melee (P2)",
+            description = "Use Protect from Melee during Phase 2 melee combat",
+            position = 0,
             section = prayerSection
     )
     default boolean protectFromMelee() {
@@ -191,10 +162,32 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "protectFromMissiles",
+            name = "Protect from Missiles (P3)",
+            description = "Use Protect from Missiles during Phase 3 and when Sire panics (50% HP)",
+            position = 1,
+            section = prayerSection
+    )
+    default boolean protectFromMissiles() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "usePiety",
+            name = "Use Piety",
+            description = "Activate Piety during melee phases (requires 70 Prayer & Defence)",
+            position = 2,
+            section = prayerSection
+    )
+    default boolean usePiety() {
+        return true;
+    }
+
+    @ConfigItem(
             keyName = "drinkPrayerAtPercent",
             name = "Drink prayer at %",
             description = "Drink prayer potion when prayer points drop below this percentage",
-            position = 2,
+            position = 3,
             section = prayerSection
     )
     @Range(min = 10, max = 80)
@@ -216,13 +209,13 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "useExtendedAntiVenom",
-            name = "Use extended anti-venom+",
-            description = "Drink extended anti-venom+ to protect from venom",
+            keyName = "useAntiPoison",
+            name = "Use anti-poison",
+            description = "Drink anti-poison/anti-venom to protect from miasma poison",
             position = 1,
             section = potionSection
     )
-    default boolean useExtendedAntiVenom() {
+    default boolean useAntiPoison() {
         return true;
     }
 
@@ -237,17 +230,6 @@ public interface AraxxorConfig extends Config {
     )
     default int lootPriceThreshold() {
         return 1000;
-    }
-
-    @ConfigItem(
-            keyName = "harvestCorpse",
-            name = "Harvest corpse",
-            description = "Harvest Araxxor's corpse (true) or destroy for doubled pet rate (false)",
-            position = 1,
-            section = lootSection
-    )
-    default boolean harvestCorpse() {
-        return true;
     }
 
     // ── Safety ──────────────────────────────────────────
@@ -277,15 +259,15 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "maxKillsPerTrip",
-            name = "Kills per trip",
-            description = "Leave after this many kills (0 = stay until out of supplies)",
+            keyName = "phase3RetreatHp",
+            name = "Phase 3 retreat HP",
+            description = "In Phase 3, retreat south briefly when HP drops below this value (scions hurt)",
             position = 2,
             section = safetySection
     )
-    @Range(min = 0, max = 50)
-    default int maxKillsPerTrip() {
-        return 0;
+    @Range(min = 20, max = 70)
+    default int phase3RetreatHp() {
+        return 40;
     }
 
     @ConfigItem(
