@@ -100,6 +100,11 @@ public class SireScript extends Script {
     private static final WorldPoint ROW3_LEFT = new WorldPoint(2969, 4770, SW_PLANE);
     private static final WorldPoint ROW3_RIGHT = new WorldPoint(2971, 4770, SW_PLANE);
 
+    // Explosion dodge: always go straight south, not left/right.
+    // Minimum Y coordinate in the arena (south wall).
+    private static final int ARENA_MIN_Y = 4768;
+    private static final int EXPLOSION_DODGE_SOUTH_TILES = 3;
+
     // Vent stand-tiles: optimal positions to hit respiratory systems with a 10-range weapon.
     // Derived from unlabelled wiki tile markers in the SW room (regionId 11850).
     private static final WorldPoint VENT_STAND_NW = new WorldPoint(2968, 4776, SW_PLANE); // regionX=24,Y=40
@@ -314,15 +319,13 @@ public class SireScript extends Script {
         explosionHappened = true;
         postExplosionMiasmaCount = 0;
         log("Explosion teleport detected — dodge queued! Post-explosion tracking started.");
-        // Pre-emptively send walk command to Row 3 from the event thread.
-        // The main loop will also spam-click, but this shaves off up to 100ms
-        // (the main loop polls at 100ms intervals).
+        // Pre-emptively send walk command straight south from the event thread.
+        // The main loop will also spam-click, but this shaves off up to 100ms.
         try {
             Player p = Microbot.getClient().getLocalPlayer();
             if (p != null) {
-                // Pick closest Row 3 tile and fire walk immediately
-                WorldPoint target = p.getWorldLocation().distanceTo(ROW3_LEFT)
-                        <= p.getWorldLocation().distanceTo(ROW3_RIGHT) ? ROW3_LEFT : ROW3_RIGHT;
+                // Go straight south (same X, Y-3) — fastest escape path
+                WorldPoint target = dodgeSouthTarget(p.getWorldLocation());
                 LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), target);
                 if (local != null) {
                     Rs2Walker.walkFastLocal(local);
@@ -426,30 +429,31 @@ public class SireScript extends Script {
         }
 
         // ── 1. CRITICAL: Phase 3 explosion dodge ──
-        // The Sire teleports the player to Row 2, then the explosion triggers.
-        // We must SPAM-CLICK Row 3 with zero delay. This is the highest priority action.
-        // GOAL: be at least 3 tiles away from Sire, preferably on Row 3.
+        // The Sire teleports the player adjacent to itself, then the explosion fires.
+        // We must go STRAIGHT SOUTH (same X, Y-3) — not to fixed left/right tiles.
+        // Straight south is the fastest path since it requires no lateral movement.
         if (explosionIncoming) {
-            status = "Dodging explosion — run to Row 3!";
+            status = "Dodging explosion — running south!";
             state = SireState.DODGING_EXPLOSION;
-            WorldPoint target = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
+            WorldPoint target = dodgeSouthTarget(player.getWorldLocation());
             // Triple-click with zero gap — the walk invoke is instant (menu action)
-            // First click may be eaten by the teleport animation; second/third guarantee movement.
             walkToSafe(target);
             walkToSafe(target);
             walkToSafe(target);
-            // Ultra-fast poll: 50ms intervals. Row 3 is only 2 tiles from Row 2.
-            // Player should arrive within 1-2 game ticks (600-1200ms).
+            // Ultra-fast poll: spam-click south every cycle until we arrive
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
-                // Keep spam-clicking every poll cycle until we arrive
-                if (p.getWorldLocation().distanceTo(target) > 1) {
-                    walkToSafe(target);
+                // Recalculate target from CURRENT position each poll cycle.
+                // This handles the case where the teleport lands us in a different spot
+                // than where we were when we first calculated.
+                WorldPoint freshTarget = dodgeSouthTarget(p.getWorldLocation());
+                if (p.getWorldLocation().distanceTo(freshTarget) > 0) {
+                    walkToSafe(freshTarget);
                     return false;
                 }
                 return true;
-            }, 1200);
+            }, 1800);
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
             return;
@@ -649,64 +653,112 @@ public class SireScript extends Script {
         }
 
         // Pick the lung to attack based on prescribed order.
-        Rs2NpcModel targetLung = pickNextLungInOrder(aliveLungs);
-        if (targetLung == null) targetLung = aliveLungs.get(0);
+        Rs2NpcModel picked = pickNextLungInOrder(aliveLungs);
+        final Rs2NpcModel targetLung = picked != null ? picked : aliveLungs.get(0);
 
         status = "Destroying vent " + (ventsDestroyed + 1) + "/4";
         state = SireState.DESTROYING_VENTS;
 
         // ── Position on a vent stand-tile within 10-range of the target lung ──
-        // Move FAST — no unnecessary waits. The walk invoke is instant;
-        // we only need a brief wait to confirm arrival.
         WorldPoint lungLoc = targetLung.getWorldLocation();
-        int distToLung = player.getWorldLocation().distanceTo(lungLoc);
-        if (distToLung > 10) {
-            WorldPoint bestStand = bestVentStandForLung(lungLoc);
-            if (bestStand != null) {
+        WorldPoint bestStand = bestVentStandForLung(lungLoc);
+
+        // Walk to stand-tile and VERIFY we are actually within attack range (≤10 tiles)
+        // before firing. If we're not in range, the interact() will make the player walk
+        // instead of shoot — and we'd move on thinking the shot landed.
+        if (bestStand != null) {
+            int distToStand = player.getWorldLocation().distanceTo(bestStand);
+            if (distToStand > 1) {
                 walkToSafe(bestStand);
-                // Fast poll — 100ms intervals, 2s max
                 sleepUntil(() -> {
                     Player p = Microbot.getClient().getLocalPlayer();
                     return p != null && p.getWorldLocation().distanceTo(bestStand) <= 1;
-                }, 2000);
-            } else {
+                }, 3000);
+            }
+        } else {
+            // No good stand-tile — walk within 10 of the lung directly
+            int distToLung = player.getWorldLocation().distanceTo(lungLoc);
+            if (distToLung > 10) {
                 walkToSafe(lungLoc);
                 sleepUntil(() -> {
                     Player p = Microbot.getClient().getLocalPlayer();
                     return p != null && p.getWorldLocation().distanceTo(lungLoc) <= 10;
-                }, 2000);
+                }, 3000);
             }
         }
 
-        // ── Attack the lung immediately — no tickSleep after interact ──
-        // Scorching bow 1-shots respiratory systems. Fire and move on.
+        // ── Double-check: are we actually within 10 tiles of the lung? ──
+        // Re-fetch player position after walking.
+        Player current = Microbot.getClient().getLocalPlayer();
+        if (current != null && current.getWorldLocation().distanceTo(targetLung.getWorldLocation()) > 10) {
+            log("WARNING: Still out of range of lung (" + current.getWorldLocation().distanceTo(targetLung.getWorldLocation())
+                    + " tiles) — retrying next loop");
+            return; // Will retry positioning next loop iteration
+        }
+
+        // ── Attack and CONFIRM the vent dies ──
+        // We must verify the vent actually died (ventsDestroyed increments) before moving on.
+        // Re-attack within the wait loop if the player stops interacting (shot missed or didn't fire).
         Rs2Npc.interact(targetLung, "attack");
 
-        // Fast-poll for vent destruction. 100ms intervals for near tick-perfect response.
         final int ventsBefore = ventsDestroyed;
-        final Rs2NpcModel nextLung = targetLung; // reference for re-attack
         sleepUntil(() -> {
             if (explosionIncoming || miasmaIncoming) return true;
             if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
             return ventsDestroyed > ventsBefore;
         }, () -> {
-            // Only eat if actually low — don't waste time otherwise
+            // Re-attack if we stopped interacting — the shot may not have fired
+            Player p = Microbot.getClient().getLocalPlayer();
+            if (p != null && !p.isInteracting()) {
+                // Make sure the lung is still alive before re-attacking
+                List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
+                        .filter(l -> !l.isDead())
+                        .collect(Collectors.toList());
+                if (!stillAlive.isEmpty()) {
+                    // Pick the closest alive lung (might be the same one or a different one)
+                    Rs2NpcModel closest = stillAlive.stream()
+                            .min(Comparator.comparingInt(l ->
+                                    p.getWorldLocation().distanceTo(l.getWorldLocation())))
+                            .orElse(null);
+                    if (closest != null) {
+                        // Check if we're in range before re-attacking
+                        if (p.getWorldLocation().distanceTo(closest.getWorldLocation()) <= 10) {
+                            Rs2Npc.interact(closest, "attack");
+                        } else {
+                            // Walk closer
+                            WorldPoint stand = bestVentStandForLung(closest.getWorldLocation());
+                            if (stand != null) {
+                                walkToSafe(stand);
+                            }
+                        }
+                    }
+                }
+            }
+            // Eat only if actually low
             if (getHpPercent() <= config.eatAtHpPercent()) {
                 Rs2Player.eatAt(config.eatAtHpPercent());
             }
-            // Re-attack if stopped interacting
-            Player p = Microbot.getClient().getLocalPlayer();
-            if (p != null && !p.isInteracting()) {
-                List<Rs2NpcModel> remaining = Rs2Npc.getNpcs(LUNG)
-                        .filter(l -> !l.isDead())
-                        .collect(Collectors.toList());
-                if (!remaining.isEmpty()) {
-                    Rs2Npc.interact(remaining.get(0), "attack");
+        }, 5000, 100);
+
+        // ── Once vent is confirmed dead, pre-walk to the NEXT vent's stand-tile ──
+        // This is the "move" part of shoot-and-move, but only AFTER confirmation.
+        if (ventsDestroyed > ventsBefore) {
+            List<Rs2NpcModel> nextLungs = Rs2Npc.getNpcs(LUNG)
+                    .filter(l -> !l.isDead())
+                    .collect(Collectors.toList());
+            if (!nextLungs.isEmpty() && getStunTicksRemaining() > RESTUN_THRESHOLD_TICKS) {
+                Rs2NpcModel nextTarget = pickNextLungInOrder(nextLungs);
+                if (nextTarget == null) nextTarget = nextLungs.get(0);
+                WorldPoint nextStand = bestVentStandForLung(nextTarget.getWorldLocation());
+                if (nextStand != null) {
+                    status = "Moving to next vent";
+                    walkToSafe(nextStand);
+                    // Don't wait for arrival — the next loop iteration will handle positioning
                 }
             }
-        }, 4000, 100); // 100ms poll interval for near tick-perfect
+        }
 
-        // Don't drink potions between every vent — only if prayer is very low
+        // Only drink prayer potion if critically low
         int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
                 / Math.max(1, Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
         if (prayerPercent < 15) {
@@ -796,33 +848,75 @@ public class SireScript extends Script {
         status = "Destroying vent " + (ventsDestroyed + 1) + "/4 (Sire out of range)";
         state = SireState.DESTROYING_VENTS;
 
-        // Position within range
+        // Position within range — verify distance ≤ 10 before attacking
         WorldPoint lungLoc = targetLung.getWorldLocation();
-        int distToLung = player.getWorldLocation().distanceTo(lungLoc);
-        if (distToLung > 10) {
-            WorldPoint bestStand = bestVentStandForLung(lungLoc);
-            if (bestStand != null) {
+        WorldPoint bestStand = bestVentStandForLung(lungLoc);
+
+        if (bestStand != null) {
+            int distToStand = player.getWorldLocation().distanceTo(bestStand);
+            if (distToStand > 1) {
                 walkToSafe(bestStand);
                 sleepUntil(() -> {
                     Player p = Microbot.getClient().getLocalPlayer();
                     return p != null && p.getWorldLocation().distanceTo(bestStand) <= 1;
                 }, 3000);
             }
+        } else {
+            int distToLung = player.getWorldLocation().distanceTo(lungLoc);
+            if (distToLung > 10) {
+                walkToSafe(lungLoc);
+                sleepUntil(() -> {
+                    Player p = Microbot.getClient().getLocalPlayer();
+                    return p != null && p.getWorldLocation().distanceTo(lungLoc) <= 10;
+                }, 3000);
+            }
         }
 
-        // Attack the lung
+        // Double-check range
+        Player current = Microbot.getClient().getLocalPlayer();
+        if (current != null && current.getWorldLocation().distanceTo(targetLung.getWorldLocation()) > 10) {
+            log("WARNING: VentsOnly — still out of range, retrying next loop");
+            return;
+        }
+
+        // Attack and confirm vent death with re-attack fallback
         Rs2Npc.interact(targetLung, "attack");
-        if (tickSleep()) return;
 
         final int ventsBefore = ventsDestroyed;
         sleepUntil(() -> {
             if (explosionIncoming || miasmaIncoming) return true;
             if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
             return ventsDestroyed > ventsBefore;
-        }, 6000);
+        }, () -> {
+            Player p = Microbot.getClient().getLocalPlayer();
+            if (p != null && !p.isInteracting()) {
+                List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
+                        .filter(l -> !l.isDead())
+                        .collect(Collectors.toList());
+                if (!stillAlive.isEmpty()) {
+                    Rs2NpcModel closest = stillAlive.stream()
+                            .min(Comparator.comparingInt(l ->
+                                    p.getWorldLocation().distanceTo(l.getWorldLocation())))
+                            .orElse(null);
+                    if (closest != null && p.getWorldLocation().distanceTo(closest.getWorldLocation()) <= 10) {
+                        Rs2Npc.interact(closest, "attack");
+                    }
+                }
+            }
+        }, 5000, 100);
 
-        drinkPrayerPotion();
-        Rs2Player.eatAt(config.eatAtHpPercent());
+        // Pre-walk to next vent after confirmed kill
+        if (ventsDestroyed > ventsBefore) {
+            List<Rs2NpcModel> nextLungs = Rs2Npc.getNpcs(LUNG)
+                    .filter(l -> !l.isDead())
+                    .collect(Collectors.toList());
+            if (!nextLungs.isEmpty() && getStunTicksRemaining() > RESTUN_THRESHOLD_TICKS) {
+                WorldPoint nextStand = bestVentStandForLung(nextLungs.get(0).getWorldLocation());
+                if (nextStand != null) {
+                    walkToSafe(nextStand);
+                }
+            }
+        }
     }
 
     // ── Phase 2: Melee Combat ────────────────────────────
@@ -945,12 +1039,11 @@ public class SireScript extends Script {
         }
 
         // ── CRITICAL: Explosion dodge (handled in main loop, but double-check here) ──
-        // The explosion fires right when the player gets teleported. Move to Row 3 NOW.
-        // Must be at least 3 tiles from Sire after dodging.
+        // Go STRAIGHT SOUTH from current position (same X, Y-3).
         if (explosionIncoming) {
-            status = "Phase 3 — dodging explosion!";
+            status = "Phase 3 — dodging explosion south!";
             state = SireState.DODGING_EXPLOSION;
-            WorldPoint target = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
+            WorldPoint target = dodgeSouthTarget(player.getWorldLocation());
             // Spam-click with no delays
             walkToSafe(target);
             walkToSafe(target);
@@ -958,12 +1051,13 @@ public class SireScript extends Script {
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
-                if (p.getWorldLocation().distanceTo(target) > 1) {
-                    walkToSafe(target);
+                WorldPoint freshTarget = dodgeSouthTarget(p.getWorldLocation());
+                if (p.getWorldLocation().distanceTo(freshTarget) > 0) {
+                    walkToSafe(freshTarget);
                     return false;
                 }
                 return true;
-            }, 1200);
+            }, 1800);
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
             return;
@@ -1608,6 +1702,17 @@ public class SireScript extends Script {
         if (player == null) return left;
         WorldPoint loc = player.getWorldLocation();
         return loc.distanceTo(left) <= loc.distanceTo(right) ? left : right;
+    }
+
+    /**
+     * Calculate the explosion dodge target: straight south from current position.
+     * Same X, Y minus EXPLOSION_DODGE_SOUTH_TILES, clamped to ARENA_MIN_Y.
+     * This is faster than walking to fixed left/right tiles because it requires
+     * no lateral movement — the player goes in a straight line.
+     */
+    private WorldPoint dodgeSouthTarget(WorldPoint current) {
+        int targetY = Math.max(current.getY() - EXPLOSION_DODGE_SOUTH_TILES, ARENA_MIN_Y);
+        return new WorldPoint(current.getX(), targetY, current.getPlane());
     }
 
     /**
