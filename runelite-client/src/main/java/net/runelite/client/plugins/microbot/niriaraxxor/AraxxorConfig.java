@@ -5,6 +5,7 @@ import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
+import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
 
 @ConfigGroup(AraxxorConfig.GROUP)
 public interface AraxxorConfig extends Config {
@@ -66,10 +67,33 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "specCount",
+            name = "Spec hit count",
+            description = "Number of spec hits to perform at the start of the fight (e.g. 2 for dual elder maul)",
+            position = 2,
+            section = combatSection
+    )
+    @Range(min = 1, max = 2)
+    default int specCount() {
+        return 2;
+    }
+
+    @ConfigItem(
+            keyName = "useSurgePotion",
+            name = "Use surge potion",
+            description = "Drink a surge potion after all spec hits land for the special attack energy boost",
+            position = 3,
+            section = combatSection
+    )
+    default boolean useSurgePotion() {
+        return false;
+    }
+
+    @ConfigItem(
             keyName = "mainWeapon",
             name = "Main weapon name",
             description = "Name of main weapon to wield after spec (e.g. Inquisitor's mace)",
-            position = 2,
+            position = 4,
             section = combatSection
     )
     default String mainWeapon() {
@@ -80,7 +104,7 @@ public interface AraxxorConfig extends Config {
             keyName = "mainShield",
             name = "Shield/offhand name",
             description = "Shield or defender to wield with main weapon (leave blank for 2H)",
-            position = 3,
+            position = 5,
             section = combatSection
     )
     default String mainShield() {
@@ -91,7 +115,7 @@ public interface AraxxorConfig extends Config {
             keyName = "araxyteSwitchWeapon",
             name = "Araxyte kill weapon",
             description = "Weapon for killing araxyte minions (Noxious halberd recommended for guaranteed max hits)",
-            position = 4,
+            position = 6,
             section = combatSection
     )
     default String araxyteSwitchWeapon() {
@@ -102,7 +126,7 @@ public interface AraxxorConfig extends Config {
             keyName = "killAcidicAraxytes",
             name = "Kill acidic araxytes",
             description = "Kill acidic (green) araxytes or ignore them and tank",
-            position = 5,
+            position = 7,
             section = combatSection
     )
     default boolean killAcidicAraxytes() {
@@ -113,11 +137,33 @@ public interface AraxxorConfig extends Config {
             keyName = "lureRupturaToAraxxor",
             name = "Lure ruptura to Araxxor",
             description = "Lure red (ruptura) araxytes to explode under Araxxor for extra damage",
-            position = 6,
+            position = 8,
             section = combatSection
     )
     default boolean lureRupturaToAraxxor() {
         return true;
+    }
+
+    @ConfigItem(
+            keyName = "useThralls",
+            name = "Use Thralls",
+            description = "Summon a thrall using the Arceuus spellbook (requires Book of the Dead and runes)",
+            position = 9,
+            section = combatSection
+    )
+    default boolean useThralls() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "thrallType",
+            name = "Thrall type",
+            description = "Which type of thrall to summon (Magic = ghost, Ranged = skeleton, Melee = zombie)",
+            position = 10,
+            section = combatSection
+    )
+    default ThrallType thrallType() {
+        return ThrallType.MELEE;
     }
 
     // ── Prayer ──────────────────────────────────────────
@@ -215,7 +261,7 @@ public interface AraxxorConfig extends Config {
     )
     @Range(min = 20, max = 90)
     default int eatAtHpPercent() {
-        return 60;
+        return 50;
     }
 
     @ConfigItem(

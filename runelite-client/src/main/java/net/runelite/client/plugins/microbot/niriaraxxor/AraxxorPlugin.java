@@ -184,6 +184,7 @@ public class AraxxorPlugin extends Plugin {
             if (text != null && text.toLowerCase().contains("skree")) {
                 log.debug("Araxxor shouted Skree! — cleave incoming");
                 script.setCleaveIncoming(true);
+                script.computeCleaveTiles();
             }
         }
     }
