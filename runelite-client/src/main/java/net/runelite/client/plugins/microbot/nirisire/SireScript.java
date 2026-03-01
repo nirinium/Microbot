@@ -132,6 +132,14 @@ public class SireScript extends Script {
             VENT_STAND_NE, VENT_STAND_E, VENT_STAND_W, VENT_STAND_NW
     };
 
+    // ── Phase 3 Safe Boundaries ──────────────────────────
+    // Tentacles hit outside these ranges. Row 2 center Y=4772, Row 3 center Y=4770.
+    // X range: 2969-2971 (3 tiles wide). Y range: 4769-4773 (covers both rows + 1 tile buffer).
+    private static final int P3_SAFE_X_MIN = 2969;
+    private static final int P3_SAFE_X_MAX = 2971;
+    private static final int P3_SAFE_Y_MIN = 4769;
+    private static final int P3_SAFE_Y_MAX = 4773;
+
     // ── State ────────────────────────────────────────────
     @Getter
     @Setter
@@ -700,11 +708,7 @@ public class SireScript extends Script {
             // or during miasma/explosion dodging.
             if (sireEngaged && currentPhase > 0) {
                 // Still eat/pot/pray while Sire is out of view
-                if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
-                    consumeOneFood();
-                }
-                drinkPrayerPotion();
-                drinkPotions();
+                handleFoodAndPotions();
 
                 // Phase 1: We can still attack vents even if the Sire NPC is out of range.
                 // The stun timer is tick-based, so we track it without needing the NPC reference.
@@ -828,55 +832,18 @@ public class SireScript extends Script {
             return;
         }
 
-        // Pick the lung to attack based on prescribed order.
-        Rs2NpcModel picked = pickNextLungInOrder(aliveLungs);
-        final Rs2NpcModel targetLung = picked != null ? picked : aliveLungs.get(0);
-
-        status = "Destroying vent " + (ventsDestroyed + 1) + "/4";
         state = SireState.DESTROYING_VENTS;
 
-        // ── Click-attack the lung directly — game auto-paths into range ──
-        // No manual stand-tile walking. The game's own pathfinding runs the
-        // player to attack range and fires the projectile in one action.
-        ventHitLanded = false;
-        Rs2Npc.interact(targetLung, "attack");
+        // ── Inner loop: attack all vents in sequence without returning to main loop ──
+        // This eliminates per-vent main-loop overhead and transitions instantly.
+        if (config.ventInnerLoop()) {
+            attackAllVentsInnerLoop();
+        } else {
+            // Single-vent mode: attack one vent, return to main loop for safety checks
+            attackSingleVent(aliveLungs);
+        }
 
-        final int ventsBefore = ventsDestroyed;
-        sleepUntil(() -> {
-            if (explosionIncoming || miasmaIncoming) return true;
-            if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
-            // Hitsplat detection fires the instant damage lands — much faster
-            // than waiting for the NPC state change (LUNG → LUNG_DYING).
-            return ventHitLanded || ventsDestroyed > ventsBefore;
-        }, () -> {
-            // Re-attack if player becomes truly idle (not moving / not interacting)
-            Player p = Microbot.getClient().getLocalPlayer();
-            if (p == null) return;
-            boolean isMoving = p.getPoseAnimation() != p.getIdlePoseAnimation();
-            if (!p.isInteracting() && !isMoving && p.getAnimation() == -1) {
-                List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
-                        .filter(l -> !l.isDead())
-                        .collect(Collectors.toList());
-                if (!stillAlive.isEmpty()) {
-                    Rs2NpcModel closest = stillAlive.stream()
-                            .min(Comparator.comparingInt(l ->
-                                    p.getWorldLocation().distanceTo(l.getWorldLocation())))
-                            .orElse(null);
-                    if (closest != null) {
-                        ventHitLanded = false;
-                        Rs2Npc.interact(closest, "attack");
-                    }
-                }
-            }
-            // Eat only if actually low
-            if (getHpPercent() <= config.eatAtHpPercent()) {
-                if (!Rs2Player.eatAt(config.eatAtHpPercent())) {
-                    consumeOneFood();
-                }
-            }
-        }, 3000, 50);
-
-        // Only drink prayer potion if critically low
+        // Only drink prayer potion if critically low (between vent kills)
         int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
                 / Math.max(1, Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
         if (prayerPercent < 15) {
@@ -962,11 +929,95 @@ public class SireScript extends Script {
             return;
         }
 
-        Rs2NpcModel targetLung = aliveLungs.get(0);
-        status = "Destroying vent " + (ventsDestroyed + 1) + "/4 (Sire out of range)";
         state = SireState.DESTROYING_VENTS;
 
-        // ── Click-attack directly — game auto-paths into range ──
+        // Use same inner loop / single vent approach as handlePhase1
+        if (config.ventInnerLoop()) {
+            attackAllVentsInnerLoop();
+        } else {
+            attackSingleVent(aliveLungs);
+        }
+    }
+
+    // ── Vent Attack Helpers ──────────────────────────────
+
+    /**
+     * Attack all alive vents in a tight inner loop without returning to the main loop.
+     * Each vent is 1-shot by the Scorching bow, so: click → hitsplat → next.
+     * Breaks out if stun is expiring, dodge is needed, or all vents are dead.
+     * Uses configurable timeout and poll interval from the Tuning config section.
+     */
+    private void attackAllVentsInnerLoop() {
+        int ventNum = ventsDestroyed;
+        for (int i = 0; i < 4; i++) {
+            // Safety: bail if stun expiring or dodge needed
+            if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) {
+                if (config.debugLogging()) log("Vent inner loop: stun expiring, breaking out");
+                break;
+            }
+            if (explosionIncoming || miasmaIncoming) break;
+
+            // Re-scan alive lungs each iteration
+            List<Rs2NpcModel> alive = Rs2Npc.getNpcs(LUNG)
+                    .filter(l -> !l.isDead())
+                    .collect(Collectors.toList());
+            if (alive.isEmpty()) break;
+
+            Rs2NpcModel target = pickNextLungInOrder(alive);
+            if (target == null) target = alive.get(0);
+
+            ventNum++;
+            status = "Destroying vent " + ventNum + "/4";
+            if (config.debugLogging()) {
+                log("Vent inner loop: attacking vent " + ventNum + " at " + target.getWorldLocation());
+            }
+
+            ventHitLanded = false;
+            Rs2Npc.interact(target, "attack");
+
+            final int ventsBefore = ventsDestroyed;
+            sleepUntil(() -> {
+                if (explosionIncoming || miasmaIncoming) return true;
+                if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
+                return ventHitLanded || ventsDestroyed > ventsBefore;
+            }, () -> {
+                // Re-attack if player becomes truly idle
+                Player p = Microbot.getClient().getLocalPlayer();
+                if (p == null) return;
+                boolean isMoving = p.getPoseAnimation() != p.getIdlePoseAnimation();
+                if (!p.isInteracting() && !isMoving && p.getAnimation() == -1) {
+                    List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
+                            .filter(l -> !l.isDead())
+                            .collect(Collectors.toList());
+                    if (!stillAlive.isEmpty()) {
+                        Rs2NpcModel closest = stillAlive.stream()
+                                .min(Comparator.comparingInt(l ->
+                                        p.getWorldLocation().distanceTo(l.getWorldLocation())))
+                                .orElse(null);
+                        if (closest != null) {
+                            ventHitLanded = false;
+                            Rs2Npc.interact(closest, "attack");
+                        }
+                    }
+                }
+            }, config.ventAttackTimeoutMs(), config.ventPollIntervalMs());
+
+            // If we broke out early, exit the loop
+            if (explosionIncoming || miasmaIncoming) break;
+            if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) break;
+        }
+    }
+
+    /**
+     * Attack a single vent and return to the main loop for safety checks.
+     * Fallback mode when ventInnerLoop is disabled.
+     */
+    private void attackSingleVent(List<Rs2NpcModel> aliveLungs) {
+        Rs2NpcModel picked = pickNextLungInOrder(aliveLungs);
+        final Rs2NpcModel targetLung = picked != null ? picked : aliveLungs.get(0);
+
+        status = "Destroying vent " + (ventsDestroyed + 1) + "/4";
+
         ventHitLanded = false;
         Rs2Npc.interact(targetLung, "attack");
 
@@ -994,7 +1045,13 @@ public class SireScript extends Script {
                     }
                 }
             }
-        }, 3000, 50);
+            // Eat only if actually low
+            if (getHpPercent() <= config.eatAtHpPercent()) {
+                if (!Rs2Player.eatAt(config.eatAtHpPercent())) {
+                    consumeOneFood();
+                }
+            }
+        }, config.ventAttackTimeoutMs(), config.ventPollIntervalMs());
     }
 
     // ── Phase 2: Melee Combat ────────────────────────────
@@ -1096,12 +1153,8 @@ public class SireScript extends Script {
             tickSleep();
         }
 
-        // Potions and food
-        drinkPotions();
-        drinkPrayerPotion();
-        if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
-            consumeOneFood();
-        }
+        // Potions and food (same-tick combo when possible)
+        handleFoodAndPotions();
     }
 
     // ── Phase 3: Apocalypse ──────────────────────────────
@@ -1165,6 +1218,39 @@ public class SireScript extends Script {
                 tickSleep();
             }
             return;
+        }
+
+        // ── P3 Position Clamping: stay within safe Row 2/Row 3 boundaries ──
+        // Tentacles do massive damage if the player drifts outside the 3-tile-wide safe rows.
+        // This catches drift caused by pathing toward the Sire when clicking attack.
+        if (config.clampP3Position()) {
+            WorldPoint loc = player.getWorldLocation();
+            if (loc.getX() < P3_SAFE_X_MIN || loc.getX() > P3_SAFE_X_MAX
+                    || loc.getY() < P3_SAFE_Y_MIN || loc.getY() > P3_SAFE_Y_MAX) {
+                // Pick the appropriate safe row based on stage
+                WorldPoint target;
+                if (explosionHappened) {
+                    // Post-explosion: prefer Row 3 (just dodged south)
+                    target = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
+                } else {
+                    // Pre-explosion: stay on Row 2
+                    target = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
+                }
+                // Avoid standing on miasma
+                if (miasmaPools.contains(target)) {
+                    if (target.equals(ROW2_LEFT)) target = ROW2_RIGHT;
+                    else if (target.equals(ROW2_RIGHT)) target = ROW2_LEFT;
+                    else if (target.equals(ROW3_LEFT)) target = ROW3_RIGHT;
+                    else target = ROW3_LEFT;
+                }
+                status = "P3 — correcting position (off safe rows)!";
+                if (config.debugLogging()) {
+                    log("P3 position clamp: player at " + loc + " → " + target);
+                }
+                walkToSafe(target);
+                sleep(300);
+                return;
+            }
         }
 
         // ── Phase 3 low-HP safety retreat ──
@@ -1262,12 +1348,8 @@ public class SireScript extends Script {
         // Skip potions/food if explosion or miasma is incoming — speed is critical
         if (explosionIncoming || miasmaIncoming) return;
 
-        // Potions and food
-        drinkPotions();
-        drinkPrayerPotion();
-        if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
-            consumeOneFood();
-        }
+        // Potions and food (same-tick combo when possible)
+        handleFoodAndPotions();
     }
 
     // ── Defence Drain Special Attack ─────────────────────
@@ -2097,6 +2179,85 @@ public class SireScript extends Script {
             }
         }
         return false;
+    }
+
+    /**
+     * Eat food interaction ONLY — no sleep afterward.
+     * For use in same-tick combos where we need to queue a potion immediately after.
+     * Handles both "eat" action food AND Saradomin brews ("drink" action).
+     *
+     * @return true if eat/drink interaction was sent, false if nothing available
+     */
+    private boolean eatFoodInteractOnly() {
+        List<Rs2ItemModel> foods = Rs2Inventory.getInventoryFood();
+        if (!foods.isEmpty()) {
+            Rs2ItemModel food = foods.get(0);
+            boolean result = food.getName().toLowerCase().contains("jug of wine")
+                    ? Rs2Inventory.interact(food, "drink")
+                    : Rs2Inventory.interact(food, "eat");
+            if (result) {
+                if (config.debugLogging()) log("Same-tick: ate " + food.getName());
+                return true;
+            }
+        }
+        Rs2ItemModel brew = Rs2Inventory.get("Saradomin brew");
+        if (brew != null && !brew.isNoted()) {
+            boolean result = Rs2Inventory.interact(brew, "Drink");
+            if (result) {
+                if (config.debugLogging()) log("Same-tick: drank brew " + brew.getName());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Optimized food + potion handling. When both are needed and same-tick combo
+     * is enabled, eats food then immediately drinks a potion in the SAME game tick.
+     * OSRS allows this because food and potions are on separate cooldowns.
+     * Saves ~600ms (1 tick) per combo versus sequential eat → sleep → pot.
+     */
+    private void handleFoodAndPotions() {
+        boolean needsEat = getHpPercent() <= config.eatAtHpPercent();
+
+        CombatPotionType potionType = config.combatPotionType();
+        boolean needsCombatPot = potionType != CombatPotionType.NONE
+                && Microbot.getClient().getBoostedSkillLevel(Skill.STRENGTH)
+                <= Microbot.getClient().getRealSkillLevel(Skill.STRENGTH);
+
+        int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
+                / Math.max(1, Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
+        boolean needsPrayerPot = prayerPercent < config.drinkPrayerAtPercent();
+
+        boolean needsAnyPot = needsCombatPot || needsPrayerPot;
+
+        if (config.sameTickEatPot() && needsEat && needsAnyPot) {
+            // ── Same-tick combo: eat first (no sleep), then pot, ONE tick sleep ──
+            boolean ate = eatFoodInteractOnly();
+            boolean drank = false;
+
+            if (needsCombatPot) {
+                drank = Rs2Inventory.interact(potionType.getInventoryName(), "drink");
+            }
+            if (!drank && needsPrayerPot) {
+                drank = Rs2Inventory.interact(
+                        Rs2Potion.getPrayerPotionsVariants().toArray(String[]::new), "drink");
+            }
+
+            if (ate || drank) {
+                if (config.debugLogging()) log("Same-tick eat+pot combo (ate=" + ate + ", drank=" + drank + ")");
+                tickSleep();
+            }
+        } else {
+            // ── Sequential fallback ──
+            drinkPotions();
+            drinkPrayerPotion();
+            if (needsEat) {
+                if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
+                    consumeOneFood();
+                }
+            }
+        }
     }
 
     // ══════════════════════════════════════════════════════
