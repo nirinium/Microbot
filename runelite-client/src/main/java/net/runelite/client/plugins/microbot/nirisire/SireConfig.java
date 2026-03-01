@@ -5,6 +5,7 @@ import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
+import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.niriaraxxor.CombatPotionType;
 
 @ConfigGroup(SireConfig.GROUP)
@@ -27,6 +28,9 @@ public interface SireConfig extends Config {
 
     @ConfigSection(name = "Safety", description = "Safety & teleport settings", position = 4)
     String safetySection = "safety";
+
+    @ConfigSection(name = "Banking", description = "Banking & walk-back settings", position = 5)
+    String bankingSection = "banking";
 
     // ── Combat ──────────────────────────────────────────
 
@@ -279,5 +283,75 @@ public interface SireConfig extends Config {
     )
     default String teleportItem() {
         return "Teleport to house";
+    }
+
+    // ── Banking ─────────────────────────────────────────
+
+    @ConfigItem(
+            keyName = "enableBanking",
+            name = "Enable banking",
+            description = "Automatically teleport out, bank, and walk back when supplies are low",
+            position = 0,
+            section = bankingSection
+    )
+    default boolean enableBanking() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "inventorySetup",
+            name = "Inventory Setup",
+            description = "Select the Inventory Setups preset to load at the bank. Create one in the Inventory Setups plugin first.",
+            position = 1,
+            section = bankingSection
+    )
+    default InventorySetup inventorySetup() {
+        return null;
+    }
+
+    @ConfigItem(
+            keyName = "minFood",
+            name = "Min food to continue",
+            description = "Bank when food count drops below this number (after looting)",
+            position = 2,
+            section = bankingSection
+    )
+    @Range(min = 0, max = 20)
+    default int minFood() {
+        return 3;
+    }
+
+    @ConfigItem(
+            keyName = "minPrayerDoses",
+            name = "Min prayer doses",
+            description = "Bank when total prayer potion doses drop below this number",
+            position = 3,
+            section = bankingSection
+    )
+    @Range(min = 0, max = 16)
+    default int minPrayerDoses() {
+        return 2;
+    }
+
+    @ConfigItem(
+            keyName = "usePohPool",
+            name = "Use POH pool",
+            description = "Use Ornate rejuvenation pool in POH to restore HP/prayer/stats before returning",
+            position = 4,
+            section = bankingSection
+    )
+    default boolean usePohPool() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "usePohFairyRing",
+            name = "Use POH fairy ring",
+            description = "Use POH fairy ring to travel back (requires Spirit tree or Fairy ring in POH). If disabled, uses nearest world fairy ring.",
+            position = 5,
+            section = bankingSection
+    )
+    default boolean usePohFairyRing() {
+        return true;
     }
 }

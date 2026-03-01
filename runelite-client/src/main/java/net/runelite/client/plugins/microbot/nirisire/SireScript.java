@@ -11,9 +11,11 @@ import net.runelite.api.gameval.NpcID;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
+import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.niriaraxxor.CombatPotionType;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
+import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.grounditem.LootingParameters;
 import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
@@ -24,6 +26,8 @@ import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
+import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
+import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.skillcalculator.skills.MagicAction;
@@ -316,26 +320,50 @@ public class SireScript extends Script {
      * Wiki: Player is always teleported to the western tile of Row 2 (2969, 4772).
      * Two ticks later the explosion fires. Spam-click Row 3 immediately.
      *
-     * Since we know the exact landing tile, we can pre-walk to ROW3_LEFT
-     * immediately from the event thread. Even if the teleport hasn't visually
-     * resolved yet, the walk command will queue and execute as soon as the
-     * player lands.
+     * The Sire plays ANIM_TELEPORT_PLAYER, then ~1 tick later the player actually
+     * teleports to Row 2. A single immediate walk fires too early and gets cancelled
+     * by the teleport. Instead we schedule staggered walk commands across the full
+     * 2-tick (1200ms) dodge window so at least several fire AFTER the player has
+     * landed on Row 2.
      */
     public void onExplosionTeleport() {
         explosionIncoming = true;
         explosionHappened = true;
         postExplosionMiasmaCount = 0;
-        log("Explosion teleport detected — spam-click Row 3! (target: " + EXPLOSION_DODGE_TARGET + ")");
-        // Pre-emptively walk to ROW3_LEFT from the event thread.
-        // We know the player will land at ROW2_LEFT, so ROW3_LEFT (2 tiles south)
-        // is always the correct target. Fire it now to shave off main-loop latency.
+        log("Explosion teleport detected — scheduling staggered Row 3 walk spam! (target: " + EXPLOSION_DODGE_TARGET + ")");
+
+        // Ensure run is enabled so the 2-tile move completes in 1 tick
+        Rs2Player.toggleRunEnergy(true);
+
+        // Fire one immediate walk (might land before teleport but costs nothing)
+        fireExplosionDodgeWalk();
+
+        // Schedule staggered walk commands every ~150ms across the dodge window.
+        // The teleport resolves ~1 tick (600ms) after the Sire's animation starts.
+        // We need walks firing from ~200ms through ~1100ms to guarantee coverage.
+        int[] delaysMs = {150, 300, 450, 600, 750, 900, 1050};
+        for (int delay : delaysMs) {
+            scheduledExecutorService.schedule(() -> {
+                try {
+                    fireExplosionDodgeWalk();
+                } catch (Exception ignored) {
+                }
+            }, delay, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /**
+     * Fire a single walk command toward the explosion dodge target (ROW3_LEFT).
+     * Used by both the scheduled stagger and the main-loop backup.
+     */
+    private void fireExplosionDodgeWalk() {
         try {
             LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), EXPLOSION_DODGE_TARGET);
             if (local != null) {
                 Rs2Walker.walkFastLocal(local);
             }
         } catch (Exception e) {
-            // Non-critical — main loop will handle the dodge
+            // Non-critical
         }
     }
 
@@ -415,6 +443,16 @@ public class SireScript extends Script {
         Player player = client.getLocalPlayer();
         if (player == null) return;
 
+        // ── Banking & travel states — handled before combat ──
+        if (state == SireState.TELEPORTING_OUT
+                || state == SireState.WALKING_TO_BANK
+                || state == SireState.BANKING
+                || state == SireState.TELEPORTING_BACK
+                || state == SireState.WALKING_TO_SIRE) {
+            handleBankingAndTravel(player);
+            return;
+        }
+
         // ── 0. Safety: eat & emergency teleport ──
         int hpPercent = getHpPercent();
         boolean hasHealing = hasHealingSupplies();
@@ -439,19 +477,25 @@ public class SireScript extends Script {
         if (explosionIncoming) {
             status = "Dodging explosion — spam-clicking Row 3!";
             state = SireState.DODGING_EXPLOSION;
-            log("Explosion dodge: player at " + player.getWorldLocation() + " → target " + EXPLOSION_DODGE_TARGET);
-            // Spam-click the known safe tile with zero gap
-            walkToSafe(EXPLOSION_DODGE_TARGET);
-            walkToSafe(EXPLOSION_DODGE_TARGET);
-            walkToSafe(EXPLOSION_DODGE_TARGET);
-            // Keep spam-clicking until we arrive (only 2 tiles, should be <1 game tick)
+            log("Explosion dodge (main loop): player at " + player.getWorldLocation() + " → target " + EXPLOSION_DODGE_TARGET);
+
+            // Ensure run is on so the 2-tile move completes in 1 game tick
+            Rs2Player.toggleRunEnergy(true);
+
+            // Aggressive spam — fire walk commands with tight sleep gaps between
+            for (int i = 0; i < 5; i++) {
+                fireExplosionDodgeWalk();
+                sleep(50);
+            }
+
+            // Keep spam-clicking until we arrive or timeout (2 ticks = 1200ms, use 1800 for safety)
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
                 if (p.getWorldLocation().distanceTo(EXPLOSION_DODGE_TARGET) <= 1) {
                     return true;
                 }
-                walkToSafe(EXPLOSION_DODGE_TARGET);
+                fireExplosionDodgeWalk();
                 return false;
             }, 1800);
             explosionDodgeTick = Microbot.getClient().getTickCount();
@@ -1041,16 +1085,21 @@ public class SireScript extends Script {
             status = "Phase 3 — dodging explosion to Row 3!";
             state = SireState.DODGING_EXPLOSION;
             log("P3 handlePhase3 explosion dodge: player at " + player.getWorldLocation() + " → " + EXPLOSION_DODGE_TARGET);
-            walkToSafe(EXPLOSION_DODGE_TARGET);
-            walkToSafe(EXPLOSION_DODGE_TARGET);
-            walkToSafe(EXPLOSION_DODGE_TARGET);
+
+            Rs2Player.toggleRunEnergy(true);
+
+            for (int i = 0; i < 5; i++) {
+                fireExplosionDodgeWalk();
+                sleep(50);
+            }
+
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
                 if (p.getWorldLocation().distanceTo(EXPLOSION_DODGE_TARGET) <= 1) {
                     return true;
                 }
-                walkToSafe(EXPLOSION_DODGE_TARGET);
+                fireExplosionDodgeWalk();
                 return false;
             }, 1800);
             explosionDodgeTick = Microbot.getClient().getTickCount();
@@ -1541,34 +1590,19 @@ public class SireScript extends Script {
             return;
         }
 
-        boolean hasHealing = hasHealingSupplies();
-        boolean hasPrayerPots = Rs2Inventory.hasItem(
-                Rs2Potion.getPrayerPotionsVariants().toArray(String[]::new));
-
-        // Double-check: also count potions with a "drink" action as potential healing
-        boolean hasDrinkables = !Rs2Inventory.getPotions().isEmpty();
-
-        log("Supply check: hasHealing=" + hasHealing
-                + ", hasPrayerPots=" + hasPrayerPots
-                + ", hasDrinkables=" + hasDrinkables
-                + ", invSize=" + Rs2Inventory.size());
-
-        if (!hasHealing && !hasDrinkables) {
-            status = "No food or potions — teleporting";
-            log("Teleporting: no healing supplies at all");
-            emergencyTeleport();
-            return;
-        }
-        if (!hasHealing || !hasPrayerPots) {
-            // Warn but DON'T teleport if we still have drinkables (brews, restores, etc.)
-            // Only teleport if we truly have nothing left.
-            if (!hasDrinkables) {
-                status = "Low supplies — teleporting (food=" + hasHealing + ", prayer=" + hasPrayerPots + ")";
-                log("Teleporting: hasHealing=" + hasHealing + ", hasPrayerPots=" + hasPrayerPots);
+        // ── Supply check → banking decision ──
+        if (needsBanking()) {
+            if (config.enableBanking()) {
+                log("Supplies low — starting banking trip");
+                state = SireState.TELEPORTING_OUT;
+                return;
+            } else {
+                // Banking disabled — emergency teleport and stop
+                status = "Low supplies — teleporting (banking disabled)";
+                log("Low supplies, banking disabled — emergency teleport");
                 emergencyTeleport();
                 return;
             }
-            log("Low food/prayer but have drinkables — continuing fight");
         }
 
         status = "Waiting for Sire...";
@@ -1878,16 +1912,441 @@ public class SireScript extends Script {
                 || Rs2Inventory.hasItem("Blighted food");
     }
 
+    // ══════════════════════════════════════════════════════
+    // ══  BANKING & WALK-BACK  ════════════════════════════
+    // ══════════════════════════════════════════════════════
+
+    // ── Abyssal Nexus entrance / navigation points ──
+    // Fairy Ring DIP lands at the Abyssal Nexus entrance (3037, 4763, 0).
+    // From there, walk south-west into the SW room where the Sire spawns.
+    private static final WorldPoint NEXUS_FAIRY_RING_LANDING = new WorldPoint(3037, 4763, 0);
+    private static final WorldPoint SIRE_SW_ROOM_ENTRANCE = new WorldPoint(2970, 4783, 0);
+
+    // POH objects for pool and fairy ring
+    private static final String POH_POOL_NAME = "Ornate rejuvenation pool";
+    private static final String POH_FAIRY_RING_NAME = "Fairy ring";
+
+    // Region ID for the Abyssal Nexus area (used to detect if we're in the arena)
+    private static final int NEXUS_REGION_ID = 11850;
+    // Region IDs for POH instances
+    private static final int POH_REGION_ID = 7769;    // one of several POH region IDs
+    private static final int POH_REGION_ID_2 = 7513;
+
     /**
-     * Placeholder for future banking implementation.
+     * Check if the player needs to bank (low food, prayer pots, etc.).
+     * Called after looting / before next kill attempt.
      */
-    @SuppressWarnings("unused")
+    private boolean needsBanking() {
+        int foodCount = Rs2Inventory.getInventoryFood().size();
+        // Count Saradomin brews as food too
+        if (Rs2Inventory.hasItem("Saradomin brew")) {
+            foodCount += Rs2Inventory.count("Saradomin brew");
+        }
+
+        boolean lowFood = foodCount < config.minFood();
+
+        // Count prayer potion doses (each dose is a separate "drink")
+        // Prayer potions come as (1), (2), (3), (4) — count items matching
+        int prayerDoses = countPotionDoses(Rs2Potion.getPrayerPotionsVariants());
+        boolean lowPrayer = prayerDoses < config.minPrayerDoses();
+
+        // Also check if we have NO healing at all (including brews)
+        boolean noHealing = !hasHealingSupplies();
+
+        if (lowFood || lowPrayer || noHealing) {
+            log("needsBanking: food=" + foodCount + "/" + config.minFood()
+                    + ", prayerDoses=" + prayerDoses + "/" + config.minPrayerDoses()
+                    + ", noHealing=" + noHealing);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Count total doses of potions matching the given name variants.
+     * E.g., ["Prayer potion", "Super restore"] → counts all (1)/(2)/(3)/(4) doses.
+     */
+    private int countPotionDoses(List<String> variants) {
+        int totalDoses = 0;
+        for (String variant : variants) {
+            for (int dose = 1; dose <= 4; dose++) {
+                String name = variant + "(" + dose + ")";
+                int count = Rs2Inventory.count(name);
+                totalDoses += count * dose;
+            }
+        }
+        return totalDoses;
+    }
+
+    /**
+     * Master handler for all banking & travel states.
+     * Called from the main loop when state is a banking/travel state.
+     *
+     * Flow: TELEPORTING_OUT → WALKING_TO_BANK → BANKING → TELEPORTING_BACK → WALKING_TO_SIRE → IDLE
+     */
+    private void handleBankingAndTravel(Player player) {
+        switch (state) {
+            case TELEPORTING_OUT:
+                handleTeleportOut();
+                break;
+            case WALKING_TO_BANK:
+                handleWalkToBank();
+                break;
+            case BANKING:
+                handleBanking();
+                break;
+            case TELEPORTING_BACK:
+                handleTeleportBack();
+                break;
+            case WALKING_TO_SIRE:
+                handleWalkToSire(player);
+                break;
+            default:
+                break;
+        }
+    }
+
+    // ── TELEPORTING_OUT ──
+
+    /**
+     * Teleport out of the Sire arena. Uses the configured teleport item (house tab, etc.).
+     * Disables prayers first to save prayer points for the next trip.
+     */
+    private void handleTeleportOut() {
+        status = "Teleporting out...";
+        togglePrayers(false);
+        Rs2Player.toggleRunEnergy(true);
+
+        // Already outside the Nexus? Skip to walk-to-bank.
+        if (!isInAbyssalNexus()) {
+            log("Already outside Nexus — walking to bank");
+            state = SireState.WALKING_TO_BANK;
+            return;
+        }
+
+        String teleItem = config.teleportItem();
+        if (teleItem.isEmpty() || !Rs2Inventory.hasItem(teleItem)) {
+            log("No teleport item '" + teleItem + "' — stopping script");
+            Microbot.showMessage("Sire: No teleport item found! Stopping.");
+            shutdown();
+            return;
+        }
+
+        // Try break → rub → teleport (covers tabs, jewellery, and scrolls)
+        if (!Rs2Inventory.interact(teleItem, "break")) {
+            if (!Rs2Inventory.interact(teleItem, "rub")) {
+                Rs2Inventory.interact(teleItem, "teleport");
+            }
+        }
+
+        // Wait for teleport to complete
+        Rs2Player.waitForAnimation();
+        sleepUntil(() -> !isInAbyssalNexus(), 8000);
+        sleep(600);
+
+        if (!isInAbyssalNexus()) {
+            log("Teleported out successfully");
+            // If we teleported to POH, handle pool + fairy ring bank
+            if (isInPOH()) {
+                if (config.usePohPool()) {
+                    usePohPool();
+                }
+                // If NOT using POH fairy ring for return, exit POH portal to reach a bank
+                if (!config.usePohFairyRing()) {
+                    exitPoh();
+                }
+            }
+            state = SireState.WALKING_TO_BANK;
+        } else {
+            log("Teleport failed — retrying next tick");
+        }
+    }
+
+    // ── WALKING_TO_BANK ──
+
+    private void handleWalkToBank() {
+        status = "Walking to bank...";
+        Rs2Player.toggleRunEnergy(true);
+
+        // If still in POH, exit via portal first
+        if (isInPOH()) {
+            exitPoh();
+            sleep(1200);
+            return;
+        }
+
+        if (Rs2Bank.isOpen()) {
+            state = SireState.BANKING;
+            return;
+        }
+
+        boolean reached = Rs2Bank.walkToBankAndUseBank();
+        if (reached && Rs2Bank.isOpen()) {
+            state = SireState.BANKING;
+        }
+        // If not reached yet, the main loop will call us again next tick
+    }
+
+    // ── BANKING ──
+
+    /**
+     * Restock supplies using the Inventory Setups plugin.
+     * Deposits loot, loads equipment & inventory from the selected setup.
+     */
     private void handleBanking() {
-        // TODO: Implement banking logic
-        // - Teleport to house/bank
-        // - Withdraw supplies
-        // - Return to Sire arena
-        log("Banking not yet implemented — stopping script");
-        shutdown();
+        status = "Banking...";
+
+        InventorySetup setup = config.inventorySetup();
+        if (setup == null) {
+            log("No inventory setup selected — stopping");
+            Microbot.showMessage("Sire: Select an Inventory Setup in the Banking section!");
+            shutdown();
+            return;
+        }
+
+        Rs2InventorySetup inventorySetup = new Rs2InventorySetup(setup, mainScheduledFuture);
+
+        // Open bank if not already open
+        if (!Rs2Bank.isOpen()) {
+            Rs2Bank.walkToBankAndUseBank();
+            sleepUntil(Rs2Bank::isOpen, 5000);
+            if (!Rs2Bank.isOpen()) return; // retry next tick
+        }
+
+        // Load equipment first
+        boolean hasEquipment = inventorySetup.doesEquipmentMatch();
+        if (!hasEquipment) {
+            status = "Banking — loading equipment...";
+            hasEquipment = inventorySetup.loadEquipment();
+            sleep(600);
+        }
+
+        // Load inventory (only after equipment matches to avoid conflicts)
+        boolean hasInventory = inventorySetup.doesInventoryMatch();
+        if (!hasInventory && inventorySetup.doesEquipmentMatch()) {
+            status = "Banking — loading inventory...";
+            hasInventory = inventorySetup.loadInventory();
+            sleep(600);
+        }
+
+        if (hasEquipment && hasInventory) {
+            Rs2Bank.closeBank();
+            sleep(600);
+
+            // Eat to full HP and drink prayer pot if needed
+            Rs2Player.eatAt(100);
+            drinkPrayerPotion();
+
+            log("Banking complete — equipment=" + hasEquipment + ", inventory=" + hasInventory);
+            state = SireState.TELEPORTING_BACK;
+        } else {
+            // Setup incomplete — might be missing items
+            log("Banking: equipment=" + hasEquipment + ", inventory=" + hasInventory + " — retrying");
+            if (!hasEquipment && !hasInventory) {
+                // Both failed — likely out of supplies
+                Microbot.showMessage("Sire: Inventory Setup '" + setup.getName()
+                        + "' could not be loaded. Check bank supplies!");
+            }
+        }
+    }
+
+    // ── TELEPORTING_BACK ──
+
+    /**
+     * Teleport back toward the Abyssal Nexus.
+     * Primary method: POH (house tab) → fairy ring DIP.
+     * If already in POH, go straight to fairy ring.
+     */
+    private void handleTeleportBack() {
+        status = "Teleporting back to Sire...";
+        Rs2Player.toggleRunEnergy(true);
+
+        // Already in the Nexus? Skip to walk.
+        if (isInAbyssalNexus()) {
+            state = SireState.WALKING_TO_SIRE;
+            return;
+        }
+
+        if (config.usePohFairyRing()) {
+            // Teleport to POH if not already there
+            if (!isInPOH()) {
+                teleportToPoh();
+                sleepUntil(this::isInPOH, 8000);
+                sleep(600);
+                if (!isInPOH()) {
+                    log("Failed to teleport to POH — retrying");
+                    return;
+                }
+            }
+
+            // Use pool if configured and haven't already
+            if (config.usePohPool()) {
+                usePohPool();
+            }
+
+            // Use POH fairy ring with code DIP
+            status = "Using fairy ring DIP...";
+            usePohFairyRing();
+            sleepUntil(this::isInAbyssalNexus, 10000);
+            sleep(600);
+
+            if (isInAbyssalNexus()) {
+                log("Arrived in Abyssal Nexus via fairy ring DIP");
+                state = SireState.WALKING_TO_SIRE;
+            } else {
+                log("Fairy ring DIP failed — retrying");
+            }
+        } else {
+            // No POH fairy ring: walk to the nearest world fairy ring
+            // Rs2Walker will handle fairy ring transport automatically
+            // when given the Nexus target coordinates
+            status = "Walking to Sire (via world fairy ring)...";
+            Rs2Walker.walkTo(SIRE_SW_ROOM_ENTRANCE);
+            if (isInAbyssalNexus()) {
+                state = SireState.WALKING_TO_SIRE;
+            }
+        }
+    }
+
+    // ── WALKING_TO_SIRE ──
+
+    /**
+     * Walk from the Nexus fairy ring landing to the SW room where the Sire spawns.
+     */
+    private void handleWalkToSire(Player player) {
+        status = "Walking to Sire arena...";
+        Rs2Player.toggleRunEnergy(true);
+
+        // Check if we're already in/near the SW room
+        int distToSW = player.getWorldLocation().distanceTo(SIRE_SW_ROOM_ENTRANCE);
+        if (distToSW <= 5) {
+            log("Arrived at SW room — ready to fight");
+            state = SireState.IDLE;
+            lastLootCompleteTick = Microbot.getClient().getTickCount(); // reset grace timer
+            return;
+        }
+
+        // Walk to SW room entrance
+        Rs2Walker.walkTo(SIRE_SW_ROOM_ENTRANCE);
+        sleepUntil(() -> {
+            Player p = Microbot.getClient().getLocalPlayer();
+            return p != null && p.getWorldLocation().distanceTo(SIRE_SW_ROOM_ENTRANCE) <= 5;
+        }, 15000);
+
+        Player p = Microbot.getClient().getLocalPlayer();
+        if (p != null && p.getWorldLocation().distanceTo(SIRE_SW_ROOM_ENTRANCE) <= 5) {
+            log("Arrived at SW room — ready to fight");
+            state = SireState.IDLE;
+            lastLootCompleteTick = Microbot.getClient().getTickCount();
+        }
+    }
+
+    // ── POH Helpers ──
+
+    private boolean isInPOH() {
+        int regionId = getPlayerRegionId();
+        return regionId == POH_REGION_ID || regionId == POH_REGION_ID_2
+                || Microbot.getClient().isInInstancedRegion();
+    }
+
+    private boolean isInAbyssalNexus() {
+        int regionId = getPlayerRegionId();
+        // The Abyssal Nexus spans several regions; the SW room is in 11850.
+        // Also check nearby regions for the fairy ring landing area.
+        return regionId == NEXUS_REGION_ID
+                || regionId == 11851   // NE room
+                || regionId == 12106   // fairy ring landing region
+                || regionId == 12107;
+    }
+
+    private int getPlayerRegionId() {
+        Player player = Microbot.getClient().getLocalPlayer();
+        if (player == null) return -1;
+        return player.getWorldLocation().getRegionID();
+    }
+
+    /**
+     * Teleport to POH using house tab or spell.
+     */
+    private void teleportToPoh() {
+        String teleItem = config.teleportItem();
+        // The teleportItem config defaults to "Teleport to house" — use it
+        if (teleItem.toLowerCase().contains("house") && Rs2Inventory.hasItem(teleItem)) {
+            if (!Rs2Inventory.interact(teleItem, "break")) {
+                Rs2Inventory.interact(teleItem, "teleport");
+            }
+            Rs2Player.waitForAnimation();
+            return;
+        }
+        // Fallback: try casting Teleport to House spell
+        if (Rs2Magic.canCast(MagicAction.TELEPORT_TO_HOUSE)) {
+            Rs2Magic.cast(MagicAction.TELEPORT_TO_HOUSE);
+            Rs2Player.waitForAnimation();
+            return;
+        }
+        // If teleport item is something else (e.g., construction cape)
+        if (Rs2Inventory.hasItem("Construct. cape") || Rs2Equipment.isWearing("Construct. cape")) {
+            if (Rs2Equipment.isWearing("Construct. cape")) {
+                Rs2Equipment.interact("Construct. cape", "Tele to POH");
+            } else {
+                Rs2Inventory.interact("Construct. cape", "Tele to POH");
+            }
+            Rs2Player.waitForAnimation();
+        }
+    }
+
+    /**
+     * Use the POH rejuvenation pool to restore HP, prayer, stats, and special attack.
+     */
+    private void usePohPool() {
+        // Find and interact with pool
+        if (Rs2GameObject.interact(POH_POOL_NAME, "Drink")) {
+            status = "Using rejuvenation pool...";
+            sleepUntil(() -> {
+                // Pool restores everything — check that HP and prayer are full
+                Client c = Microbot.getClient();
+                return c.getBoostedSkillLevel(Skill.HITPOINTS) >= c.getRealSkillLevel(Skill.HITPOINTS)
+                        && c.getBoostedSkillLevel(Skill.PRAYER) >= c.getRealSkillLevel(Skill.PRAYER);
+            }, 5000);
+            sleep(600);
+            log("POH pool used — stats restored");
+        } else {
+            // Pool might not be reachable (wrong POH layout)
+            log("Could not find/interact with POH pool");
+        }
+    }
+
+    /**
+     * Use the POH fairy ring to teleport to DIP (Abyssal Nexus).
+     * This interacts with the fairy ring object and selects the DIP code.
+     * Rs2Walker's fairy ring handler will dial the code automatically.
+     */
+    private void usePohFairyRing() {
+        // The fairy ring in POH — try the tree+ring combo first, then standalone ring
+        if (!Rs2GameObject.interact("Fairy ring", "Last-destination (DIP)")) {
+            // If the quick-travel option doesn't work, try configure
+            if (Rs2GameObject.interact("Fairy ring", "Configure")) {
+                sleep(1200);
+                // Rs2Walker's fairy ring system will handle dialing DIP
+                // For now, just use the Rs2Walker walkTo which handles fairy rings internally
+                Rs2Walker.walkTo(NEXUS_FAIRY_RING_LANDING);
+            } else if (Rs2GameObject.interact("Spirit tree & fairy ring", "Ring-last-destination (DIP)")) {
+                // Combined spirit tree + fairy ring in POH
+                sleep(600);
+            } else if (Rs2GameObject.interact("Spirit tree & fairy ring", "Ring-configure")) {
+                sleep(1200);
+                Rs2Walker.walkTo(NEXUS_FAIRY_RING_LANDING);
+            }
+        }
+        sleep(600);
+    }
+
+    /**
+     * Exit POH through the portal.
+     */
+    private void exitPoh() {
+        Rs2GameObject.interact("Portal", "Enter");
+        sleepUntil(() -> !isInPOH(), 5000);
+        sleep(600);
     }
 }
