@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GraphicsObject;
 import net.runelite.api.NPC;
+import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.*;
 import net.runelite.api.gameval.AnimationID;
@@ -49,7 +50,7 @@ public class SirePlugin extends Plugin {
     private static final int SIRE_PUPPET = NpcID.ABYSSALSIRE_SIRE_PUPPET;
     private static final int SIRE_WANDERING = NpcID.ABYSSALSIRE_SIRE_WANDERING;
     private static final int SIRE_PANICKING = NpcID.ABYSSALSIRE_SIRE_PANICKING;
-    private static final int SIRE_APOCALYPSE = NpcID.ABYSSALSIRE_SIRE_APOCALYPSE;
+    private static final int SIRE_APOCALYPSE = NpcID.ABYSSALSIRE_SIRE_APOCALYPSE; //Phase 3 P3
 
     // Respiratory systems (lungs/vents)
     private static final int LUNG = NpcID.ABYSSALSIRE_LUNG;
@@ -69,6 +70,24 @@ public class SirePlugin extends Plugin {
     private static final int ANIM_PANIC_MODE = AnimationID.SIRE_PANIC_MODE;
     private static final int ANIM_APOCALYPSE = AnimationID.SIRE_APOCALYPSE;
     private static final int ANIM_DEATH = AnimationID.SIRE_DEATH;
+
+    // ── P3 Regular Attack Animations (for explosion prediction) ──
+    // These are the Sire's melee/tentacle attacks during Phase 3.
+    // Counting these lets us predict the explosion ~1 attack early.
+    private static final int ANIM_RIGHT_HOOK = AnimationID.SIRE_RIGHT_HOOK;
+    private static final int ANIM_RIGHT_WHIP = AnimationID.SIRE_ATTACK_RIGHT_WHIP;
+    private static final int ANIM_DOUBLE_HOOK = AnimationID.SIRE_ATTACK_DOUBLE_HOOK;
+    private static final int ANIM_DOUBLE_WHIPS = AnimationID.SIRE_ATTACK_DOUBLE_WHIPS;
+    private static final int ANIM_SPAWNS = AnimationID.SIRE_ATTACK_SPAWNS;
+    private static final int ANIM_SPAWNS_TWO = AnimationID.SIRE_ATTACK_SPAWNS_TWO;
+
+    // All P3 "regular" attack animations (everything except the explosion teleport)
+    private static final Set<Integer> P3_REGULAR_ATTACK_ANIMS = Set.of(
+            ANIM_MIASMA, ANIM_MIASMA_TWO,
+            ANIM_RIGHT_HOOK, ANIM_RIGHT_WHIP,
+            ANIM_DOUBLE_HOOK, ANIM_DOUBLE_WHIPS,
+            ANIM_SPAWNS, ANIM_SPAWNS_TWO
+    );
 
     // ── Miasma Spot Animation ID ─────────────────────────
     private static final int MIASMA_SPOTANIM = SpotanimID.ABYSSAL_MIASMA_SPOTANIM; // 1275
@@ -123,6 +142,14 @@ public class SirePlugin extends Plugin {
         if (anim == ANIM_TELEPORT_PLAYER) {
             log.debug("Sire explosion teleport detected — DODGE NOW!");
             script.onExplosionTeleport();
+        }
+
+        // Phase 3 regular attack counting (for explosion prediction)
+        // Every ~4 regular attacks the Sire does the explosion teleport.
+        // Counting lets us prepare ~1 attack early.
+        if (P3_REGULAR_ATTACK_ANIMS.contains(anim) && script.getCurrentPhase() == 3) {
+            log.debug("Sire P3 regular attack (anim {}) — incrementing counter", anim);
+            script.onSireP3Attack();
         }
 
         // Phase 1→2 transition
@@ -213,5 +240,33 @@ public class SirePlugin extends Plugin {
             log.debug("Miasma spot anim spawned at {}", loc);
             script.onMiasmaPoolSpawned(loc);
         }
+    }
+
+    // ── Hitsplat Events (instant vent-kill detection) ──
+
+    @Subscribe
+    public void onHitsplatApplied(HitsplatApplied event) {
+        if (!(event.getActor() instanceof NPC)) return;
+        NPC npc = (NPC) event.getActor();
+        if (npc.getId() != LUNG) return;
+
+        // Any hitsplat on a lung means our attack landed (only we are in the room)
+        log.debug("Hitsplat on lung {} at {}", npc.getIndex(), npc.getWorldLocation());
+        script.onVentHit();
+    }
+
+    // ── Game Tick Events (tick-perfect explosion position check) ──
+
+    @Subscribe
+    public void onGameTick(GameTick event) {
+        // Tick-perfect fallback: if the player was just teleported to ROW2_LEFT
+        // during P3, immediately trigger the explosion dodge.
+        // This fires on the EXACT tick the teleport resolves — no scheduling delay.
+        if (script.getCurrentPhase() != 3) return;
+
+        Player player = client.getLocalPlayer();
+        if (player == null) return;
+
+        script.onGameTickExplosionCheck(player);
     }
 }

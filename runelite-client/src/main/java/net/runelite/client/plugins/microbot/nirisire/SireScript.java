@@ -19,6 +19,7 @@ import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.grounditem.LootingParameters;
 import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.misc.Rs2Potion;
 import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
@@ -28,10 +29,12 @@ import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
 import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
+import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.skillcalculator.skills.MagicAction;
 
+import java.awt.Rectangle;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -151,6 +154,8 @@ public class SireScript extends Script {
 
     // Spec tracking
     private volatile int specHitsCompleted = 0;
+    // Track whether the Phase 3 damage spec has been attempted (prevents infinite retries)
+    private volatile boolean damageSpecUsed = false;
 
     // Miasma tracking
     @Getter
@@ -181,6 +186,22 @@ public class SireScript extends Script {
     @Getter
     private volatile int postExplosionMiasmaCount = 0;
     private static final int POST_EXPLOSION_MIASMA_LIMIT = 3;
+
+    // ── P3 Explosion Prediction (attack counting) ────────
+    // The Sire does ~4 regular attacks in P3 before the explosion teleport.
+    // By counting attacks we can predict the explosion ~1 attack early.
+    @Getter
+    private volatile int p3AttackCount = 0;
+    @Getter
+    private volatile boolean explosionImminent = false;
+    // After this many P3 regular attacks, flag explosion as imminent.
+    // Sire typically does 4 attacks before explosion, so 3 gives ~1 attack lead.
+    private static final int P3_EXPLOSION_WARN_THRESHOLD = 3;
+    // Track last known player location for tick-perfect teleport detection
+    private volatile WorldPoint lastPlayerLocation = null;
+
+    // Vent hit detection — set by HitsplatApplied on lung NPCs for instant vent-to-vent transitions
+    private volatile boolean ventHitLanded = false;
 
     // Sire position tracking — set on first detection
     private volatile WorldPoint sireSpawnPos = null;
@@ -215,6 +236,10 @@ public class SireScript extends Script {
         explosionIncoming = false;
         explosionHappened = false;
         postExplosionMiasmaCount = 0;
+        p3AttackCount = 0;
+        explosionImminent = false;
+        lastPlayerLocation = null;
+        damageSpecUsed = false;
         sireSpawnPos = null;
         firstStunOnSleeping = false;
         sireEngaged = false;
@@ -330,6 +355,9 @@ public class SireScript extends Script {
         explosionIncoming = true;
         explosionHappened = true;
         postExplosionMiasmaCount = 0;
+        // Reset P3 attack counter — the explosion just happened, cycle restarts
+        p3AttackCount = 0;
+        explosionImminent = false;
         log("Explosion teleport detected — scheduling staggered Row 3 walk spam! (target: " + EXPLOSION_DODGE_TARGET + ")");
 
         // Ensure run is enabled so the 2-tile move completes in 1 tick
@@ -354,16 +382,38 @@ public class SireScript extends Script {
 
     /**
      * Fire a single walk command toward the explosion dodge target (ROW3_LEFT).
-     * Used by both the scheduled stagger and the main-loop backup.
+     * Uses a DIRECT menu invoke with zero overhead — no toggleRunEnergy sleep,
+     * no camera checks, no minimap fallback. This is the fastest possible walk.
+     * Run energy should already be enabled before this is called.
      */
     private void fireExplosionDodgeWalk() {
         try {
-            LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), EXPLOSION_DODGE_TARGET);
-            if (local != null) {
-                Rs2Walker.walkFastLocal(local);
+            LocalPoint local = LocalPoint.fromWorld(
+                    Microbot.getClient().getTopLevelWorldView(), EXPLOSION_DODGE_TARGET);
+            if (local == null) return;
+
+            Point canv = Perspective.localToCanvas(
+                    Microbot.getClient(), local,
+                    Microbot.getClient().getTopLevelWorldView().getPlane());
+
+            if (canv != null && canv.getX() >= 0 && canv.getY() >= 0) {
+                // Direct canvas walk — fastest path
+                NewMenuEntry entry = new NewMenuEntry()
+                        .param0(canv.getX())
+                        .param1(canv.getY())
+                        .type(MenuAction.WALK)
+                        .identifier(0)
+                        .itemId(-1)
+                        .option("Walk here");
+                Microbot.doInvoke(entry,
+                        new Rectangle(1, 1, Microbot.getClient().getCanvasWidth(),
+                                Microbot.getClient().getCanvasHeight()));
+            } else {
+                // Tile off-screen — use minimap as fallback (still no run toggle)
+                Rs2Walker.walkMiniMap(EXPLOSION_DODGE_TARGET);
             }
         } catch (Exception e) {
-            // Non-critical
+            // Non-critical — best-effort dodge
         }
     }
 
@@ -379,7 +429,72 @@ public class SireScript extends Script {
             if (newPhase == 2) {
                 sirePanicking = false;
             }
+            if (newPhase == 3) {
+                // Reset P3 attack counter on entering Phase 3
+                p3AttackCount = 0;
+                explosionImminent = false;
+            }
         }
+    }
+
+    /**
+     * Called when the Sire performs a regular (non-explosion) attack during Phase 3.
+     * Increments the attack counter. When the count reaches the threshold,
+     * the explosion is flagged as imminent so the script can prepare.
+     */
+    public void onSireP3Attack() {
+        p3AttackCount++;
+        log("P3 attack count: " + p3AttackCount + " (threshold: " + P3_EXPLOSION_WARN_THRESHOLD + ")");
+        if (p3AttackCount >= P3_EXPLOSION_WARN_THRESHOLD && !explosionImminent) {
+            explosionImminent = true;
+            log("Explosion IMMINENT — pre-enabling run energy, preparing dodge!");
+            // Pre-enable run so we're ready the instant the teleport fires
+            Rs2Player.toggleRunEnergy(true);
+        }
+    }
+
+    /**
+     * Called every game tick during Phase 3. Provides tick-perfect detection
+     * of the player being teleported to ROW2_LEFT by comparing current position
+     * with the previous tick's position.
+     * <p>
+     * Also provides multi-tick follow-up: while explosionIncoming is true and
+     * the player hasn't reached safety, keeps firing walk commands every tick
+     * on the client thread for maximum reliability.
+     */
+    public void onGameTickExplosionCheck(Player player) {
+        WorldPoint currentPos = player.getWorldLocation();
+
+        // ── Multi-tick follow-up: keep walking south every tick while dodging ──
+        // This runs ON the client thread so walk commands are processed immediately.
+        // Catches cases where the initial walk failed (camera, scene load, etc.)
+        if (explosionIncoming && currentPos.distanceTo(EXPLOSION_DODGE_TARGET) > 1) {
+            log("TICK-FOLLOWUP: Still dodging! Player at " + currentPos + " → " + EXPLOSION_DODGE_TARGET);
+            Rs2Player.toggleRunEnergy(true);
+            fireExplosionDodgeWalk();
+        }
+
+        // ── Detect sudden teleport to the explosion landing tile ──
+        // Fires even if explosionIncoming is already true (animation detection may
+        // have set it). The walk command here is the most reliable because it runs
+        // on the client thread at the exact tick the teleport resolves.
+        if (currentPos.equals(EXPLOSION_TELEPORT_LANDING)
+                && lastPlayerLocation != null
+                && !lastPlayerLocation.equals(EXPLOSION_TELEPORT_LANDING)) {
+            log("TICK-PERFECT: Player teleported to ROW2_LEFT! Firing immediate dodge walk.");
+            explosionIncoming = true;
+            explosionHappened = true;
+            postExplosionMiasmaCount = 0;
+            p3AttackCount = 0;
+            explosionImminent = false;
+
+            // Fire the dodge walk IMMEDIATELY — this is on the client thread,
+            // so it processes on this exact tick with zero delay.
+            Rs2Player.toggleRunEnergy(true);
+            fireExplosionDodgeWalk();
+        }
+
+        lastPlayerLocation = currentPos;
     }
 
     /**
@@ -399,6 +514,16 @@ public class SireScript extends Script {
         if (ventsDestroyed >= 4) return; // guard against double-counting
         ventsDestroyed++;
         log("Vent destroyed! Total: " + ventsDestroyed + "/4");
+    }
+
+    /**
+     * Called when a hitsplat lands on a lung NPC (our attack connected).
+     * This fires ~1 tick before the lung transitions to LUNG_DYING,
+     * allowing us to target the next vent immediately.
+     */
+    public void onVentHit() {
+        ventHitLanded = true;
+        log("Vent hit detected via hitsplat!");
     }
 
     /**
@@ -465,7 +590,12 @@ public class SireScript extends Script {
         if (hpPercent <= config.eatAtHpPercent() && hasHealing) {
             status = "Eating...";
             state = SireState.EATING;
-            Rs2Player.eatAt(config.eatAtHpPercent());
+            // Rs2Player.eatAt() only handles "eat" action items.
+            // If it fails (only brews left), use our consumeOneFood() fallback.
+            // Guard: eatAt returns false both when HP is fine AND when no eat-food exists.
+            if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
+                consumeOneFood();
+            }
             if (tickSleep()) return;
         }
 
@@ -570,7 +700,9 @@ public class SireScript extends Script {
             // or during miasma/explosion dodging.
             if (sireEngaged && currentPhase > 0) {
                 // Still eat/pot/pray while Sire is out of view
-                Rs2Player.eatAt(config.eatAtHpPercent());
+                if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
+                    consumeOneFood();
+                }
                 drinkPrayerPotion();
                 drinkPotions();
 
@@ -703,101 +835,46 @@ public class SireScript extends Script {
         status = "Destroying vent " + (ventsDestroyed + 1) + "/4";
         state = SireState.DESTROYING_VENTS;
 
-        // ── Position on a vent stand-tile within 10-range of the target lung ──
-        WorldPoint lungLoc = targetLung.getWorldLocation();
-        WorldPoint bestStand = bestVentStandForLung(lungLoc);
-
-        // Walk to stand-tile and VERIFY we are actually within attack range (≤10 tiles)
-        // before firing. If we're not in range, the interact() will make the player walk
-        // instead of shoot — and we'd move on thinking the shot landed.
-        if (bestStand != null) {
-            int distToStand = player.getWorldLocation().distanceTo(bestStand);
-            if (distToStand > 1) {
-                walkToSafe(bestStand);
-                sleepUntil(() -> {
-                    Player p = Microbot.getClient().getLocalPlayer();
-                    return p != null && p.getWorldLocation().distanceTo(bestStand) <= 1;
-                }, 3000);
-            }
-        } else {
-            // No good stand-tile — walk within 10 of the lung directly
-            int distToLung = player.getWorldLocation().distanceTo(lungLoc);
-            if (distToLung > 10) {
-                walkToSafe(lungLoc);
-                sleepUntil(() -> {
-                    Player p = Microbot.getClient().getLocalPlayer();
-                    return p != null && p.getWorldLocation().distanceTo(lungLoc) <= 10;
-                }, 3000);
-            }
-        }
-
-        // ── Double-check: are we actually within 10 tiles of the lung? ──
-        // Re-fetch player position after walking.
-        Player current = Microbot.getClient().getLocalPlayer();
-        if (current != null && current.getWorldLocation().distanceTo(targetLung.getWorldLocation()) > 10) {
-            log("WARNING: Still out of range of lung (" + current.getWorldLocation().distanceTo(targetLung.getWorldLocation())
-                    + " tiles) — retrying next loop");
-            return; // Will retry positioning next loop iteration
-        }
-
-        // ── Attack and CONFIRM the vent dies ──
-        // We must verify the vent actually died (ventsDestroyed increments) before moving on.
-        // Re-attack within the wait loop if the player stops interacting (shot missed or didn't fire).
+        // ── Click-attack the lung directly — game auto-paths into range ──
+        // No manual stand-tile walking. The game's own pathfinding runs the
+        // player to attack range and fires the projectile in one action.
+        ventHitLanded = false;
         Rs2Npc.interact(targetLung, "attack");
 
         final int ventsBefore = ventsDestroyed;
         sleepUntil(() -> {
             if (explosionIncoming || miasmaIncoming) return true;
             if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
-            return ventsDestroyed > ventsBefore;
+            // Hitsplat detection fires the instant damage lands — much faster
+            // than waiting for the NPC state change (LUNG → LUNG_DYING).
+            return ventHitLanded || ventsDestroyed > ventsBefore;
         }, () -> {
-            // Re-attack if we stopped interacting — the shot may not have fired.
-            // IMPORTANT: Do NOT send walk commands here. If the player is walking
-            // toward the lung to attack, isInteracting() may be false during the
-            // walk phase. Sending a walk-to-stand-tile would fight the game's
-            // own pathfinding and cause bouncing.
+            // Re-attack if player becomes truly idle (not moving / not interacting)
             Player p = Microbot.getClient().getLocalPlayer();
             if (p == null) return;
-            // Only re-attack if player is truly idle (not animating, not moving)
             boolean isMoving = p.getPoseAnimation() != p.getIdlePoseAnimation();
             if (!p.isInteracting() && !isMoving && p.getAnimation() == -1) {
                 List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
                         .filter(l -> !l.isDead())
                         .collect(Collectors.toList());
                 if (!stillAlive.isEmpty()) {
-                    // Just re-attack — let the game handle walking into range
                     Rs2NpcModel closest = stillAlive.stream()
                             .min(Comparator.comparingInt(l ->
                                     p.getWorldLocation().distanceTo(l.getWorldLocation())))
                             .orElse(null);
                     if (closest != null) {
+                        ventHitLanded = false;
                         Rs2Npc.interact(closest, "attack");
                     }
                 }
             }
             // Eat only if actually low
             if (getHpPercent() <= config.eatAtHpPercent()) {
-                Rs2Player.eatAt(config.eatAtHpPercent());
-            }
-        }, 5000, 100);
-
-        // ── Once vent is confirmed dead, pre-walk to the NEXT vent's stand-tile ──
-        // This is the "move" part of shoot-and-move, but only AFTER confirmation.
-        if (ventsDestroyed > ventsBefore) {
-            List<Rs2NpcModel> nextLungs = Rs2Npc.getNpcs(LUNG)
-                    .filter(l -> !l.isDead())
-                    .collect(Collectors.toList());
-            if (!nextLungs.isEmpty() && getStunTicksRemaining() > RESTUN_THRESHOLD_TICKS) {
-                Rs2NpcModel nextTarget = pickNextLungInOrder(nextLungs);
-                if (nextTarget == null) nextTarget = nextLungs.get(0);
-                WorldPoint nextStand = bestVentStandForLung(nextTarget.getWorldLocation());
-                if (nextStand != null) {
-                    status = "Moving to next vent";
-                    walkToSafe(nextStand);
-                    // Don't wait for arrival — the next loop iteration will handle positioning
+                if (!Rs2Player.eatAt(config.eatAtHpPercent())) {
+                    consumeOneFood();
                 }
             }
-        }
+        }, 3000, 50);
 
         // Only drink prayer potion if critically low
         int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
@@ -889,48 +966,20 @@ public class SireScript extends Script {
         status = "Destroying vent " + (ventsDestroyed + 1) + "/4 (Sire out of range)";
         state = SireState.DESTROYING_VENTS;
 
-        // Position within range — verify distance ≤ 10 before attacking
-        WorldPoint lungLoc = targetLung.getWorldLocation();
-        WorldPoint bestStand = bestVentStandForLung(lungLoc);
-
-        if (bestStand != null) {
-            int distToStand = player.getWorldLocation().distanceTo(bestStand);
-            if (distToStand > 1) {
-                walkToSafe(bestStand);
-                sleepUntil(() -> {
-                    Player p = Microbot.getClient().getLocalPlayer();
-                    return p != null && p.getWorldLocation().distanceTo(bestStand) <= 1;
-                }, 3000);
-            }
-        } else {
-            int distToLung = player.getWorldLocation().distanceTo(lungLoc);
-            if (distToLung > 10) {
-                walkToSafe(lungLoc);
-                sleepUntil(() -> {
-                    Player p = Microbot.getClient().getLocalPlayer();
-                    return p != null && p.getWorldLocation().distanceTo(lungLoc) <= 10;
-                }, 3000);
-            }
-        }
-
-        // Double-check range
-        Player current = Microbot.getClient().getLocalPlayer();
-        if (current != null && current.getWorldLocation().distanceTo(targetLung.getWorldLocation()) > 10) {
-            log("WARNING: VentsOnly — still out of range, retrying next loop");
-            return;
-        }
-
-        // Attack and confirm vent death with re-attack fallback
+        // ── Click-attack directly — game auto-paths into range ──
+        ventHitLanded = false;
         Rs2Npc.interact(targetLung, "attack");
 
         final int ventsBefore = ventsDestroyed;
         sleepUntil(() -> {
             if (explosionIncoming || miasmaIncoming) return true;
             if (getStunTicksRemaining() <= RESTUN_THRESHOLD_TICKS) return true;
-            return ventsDestroyed > ventsBefore;
+            return ventHitLanded || ventsDestroyed > ventsBefore;
         }, () -> {
             Player p = Microbot.getClient().getLocalPlayer();
-            if (p != null && !p.isInteracting()) {
+            if (p == null) return;
+            boolean isMoving = p.getPoseAnimation() != p.getIdlePoseAnimation();
+            if (!p.isInteracting() && !isMoving && p.getAnimation() == -1) {
                 List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
                         .filter(l -> !l.isDead())
                         .collect(Collectors.toList());
@@ -939,25 +988,13 @@ public class SireScript extends Script {
                             .min(Comparator.comparingInt(l ->
                                     p.getWorldLocation().distanceTo(l.getWorldLocation())))
                             .orElse(null);
-                    if (closest != null && p.getWorldLocation().distanceTo(closest.getWorldLocation()) <= 10) {
+                    if (closest != null) {
+                        ventHitLanded = false;
                         Rs2Npc.interact(closest, "attack");
                     }
                 }
             }
-        }, 5000, 100);
-
-        // Pre-walk to next vent after confirmed kill
-        if (ventsDestroyed > ventsBefore) {
-            List<Rs2NpcModel> nextLungs = Rs2Npc.getNpcs(LUNG)
-                    .filter(l -> !l.isDead())
-                    .collect(Collectors.toList());
-            if (!nextLungs.isEmpty() && getStunTicksRemaining() > RESTUN_THRESHOLD_TICKS) {
-                WorldPoint nextStand = bestVentStandForLung(nextLungs.get(0).getWorldLocation());
-                if (nextStand != null) {
-                    walkToSafe(nextStand);
-                }
-            }
-        }
+        }, 3000, 50);
     }
 
     // ── Phase 2: Melee Combat ────────────────────────────
@@ -980,7 +1017,13 @@ public class SireScript extends Script {
 
         // ── Defence drain spec at start of Phase 2 ──
         // Wiki: "If reducing the Sire's defence, use one special attack now"
-        if (config.useSpecialAttack() && specHitsCompleted < config.specCount()) {
+        // If Phase 3 damage spec is enabled, limit Phase 2 specs to 1 so we
+        // preserve 50% spec energy for Burning claws / Dragon claws.
+        int maxP2Specs = config.specCount();
+        if (config.useDamageSpec() && !config.damageSpecWeapon().isEmpty()) {
+            maxP2Specs = Math.min(maxP2Specs, 1);
+        }
+        if (config.useSpecialAttack() && specHitsCompleted < maxP2Specs) {
             if (performSpecialAttack(sire)) {
                 return;
             }
@@ -1056,7 +1099,9 @@ public class SireScript extends Script {
         // Potions and food
         drinkPotions();
         drinkPrayerPotion();
-        Rs2Player.eatAt(config.eatAtHpPercent());
+        if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
+            consumeOneFood();
+        }
     }
 
     // ── Phase 3: Apocalypse ──────────────────────────────
@@ -1139,9 +1184,9 @@ public class SireScript extends Script {
                 }
                 walkToSafe(retreatTarget);
                 sleep(600);
-                Rs2Player.eatAt(100); // eat up as much as possible
+                if (!Rs2Player.eatAt(100)) { consumeOneFood(); } // eat up as much as possible
                 tickSleep();
-                Rs2Player.eatAt(100);
+                if (!Rs2Player.eatAt(100)) { consumeOneFood(); }
                 sleep(600);
                 return;
             }
@@ -1199,7 +1244,14 @@ public class SireScript extends Script {
                 return;
             }
 
-            status = "Phase 3 — fighting!";
+            // ── Explosion prediction: show imminent status and keep run on ──
+            if (explosionImminent) {
+                status = "Phase 3 — EXPLOSION IMMINENT! (attacks: " + p3AttackCount + ") Fighting...";
+                // Keep run energy on so the teleport→Row3 move completes in 1 tick
+                Rs2Player.toggleRunEnergy(true);
+            } else {
+                status = "Phase 3 — fighting! (attacks: " + p3AttackCount + ")";
+            }
 
             if (!Rs2Combat.inCombat() || !player.isInteracting()) {
                 Rs2Npc.interact(sire, "attack");
@@ -1207,10 +1259,15 @@ public class SireScript extends Script {
             }
         }
 
+        // Skip potions/food if explosion or miasma is incoming — speed is critical
+        if (explosionIncoming || miasmaIncoming) return;
+
         // Potions and food
         drinkPotions();
         drinkPrayerPotion();
-        Rs2Player.eatAt(config.eatAtHpPercent());
+        if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
+            consumeOneFood();
+        }
     }
 
     // ── Defence Drain Special Attack ─────────────────────
@@ -1305,74 +1362,136 @@ public class SireScript extends Script {
     /**
      * Perform damage spec with Burning claws / Dragon claws / Voidwaker during Phase 3.
      * Wiki: "Use any remaining specs and watch your health, as the scions can do a lot of damage."
+     *
+     * Returns true if the spec was executed (or we're still working on it),
+     * false if we should skip and attack normally (no weapon, no energy, already tried).
      */
     private boolean performDamageSpec(Rs2NpcModel sire) {
+        // ── Already used this kill — don't retry ──
+        if (damageSpecUsed) return false;
+
         String dmgWeapon = config.damageSpecWeapon();
-        if (dmgWeapon.isEmpty()) return false;
+        if (dmgWeapon.isEmpty()) {
+            log("Damage spec: weapon name is empty in config — skipping");
+            damageSpecUsed = true;
+            return false;
+        }
 
-        int specEnergy = Microbot.getClient().getVarpValue(300) / 10;
-        int specCost = config.damageSpecCost();
-
-        if (specEnergy < specCost) return false;
-
+        // ── Check if weapon is available ──
         boolean specEquipped = Rs2Equipment.isWearing(dmgWeapon);
-        if (!specEquipped && !Rs2Inventory.hasItem(dmgWeapon)) return false;
+        if (!specEquipped && !Rs2Inventory.hasItem(dmgWeapon)) {
+            log("Damage spec: " + dmgWeapon + " not equipped or in inventory — skipping");
+            damageSpecUsed = true;
+            return false;
+        }
 
-        // Ensure close enough to melee — but NEVER walk north of Row 2 in P3
-        // (tentacles do huge damage). Stay on Row 2 and let the Sire come to us.
+        // ── Check spec energy ──
+        int specEnergyRaw = Microbot.getClient().getVarpValue(300); // 0-1000 scale
+        int specCost = config.damageSpecCost();
+        int specCostRaw = specCost * 10; // convert % to 0-1000 scale
+
+        if (specEnergyRaw < specCostRaw) {
+            log("Damage spec: insufficient energy " + (specEnergyRaw / 10) + "% < " + specCost + "% — skipping");
+            damageSpecUsed = true; // don't block future loops waiting for regen
+            return false;
+        }
+
+        // ── Ensure player is on Row 2 ──
         Player player = Microbot.getClient().getLocalPlayer();
-        if (player != null) {
-            int npcSize = sire.getComposition() != null ? sire.getComposition().getSize() : 3;
-            int dist = player.getWorldLocation().distanceTo(sire.getWorldLocation());
-            if (dist > npcSize) {
-                // In Phase 3, don't walk toward Sire — stay on Row 2 and wait
-                status = "Phase 3 — waiting for Sire to be in range for damage spec";
-                WorldPoint row2 = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
-                int distToRow2 = player.getWorldLocation().distanceTo(row2);
-                if (distToRow2 > 2) {
-                    walkToSafe(row2);
-                }
-                tickSleep();
-                return true;
-            }
+        if (player == null) return false;
+        WorldPoint row2 = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
+        if (player.getWorldLocation().distanceTo(row2) > 2) {
+            status = "Phase 3 — moving to Row 2 for damage spec";
+            walkToSafe(row2);
+            sleep(600);
+            return true;
         }
 
         state = SireState.SPEC_ATTACK;
 
-        // Equip damage spec weapon
+        // ── Step 1: Equip damage spec weapon ──
         if (!specEquipped) {
             status = "Equipping " + dmgWeapon;
+            log("Damage spec: equipping " + dmgWeapon);
             if (!Rs2Inventory.wield(dmgWeapon)) {
-                log("WARNING: " + dmgWeapon + " not in inventory!");
+                log("WARNING: Rs2Inventory.wield(" + dmgWeapon + ") failed!");
+                damageSpecUsed = true;
                 return false;
             }
             if (tickSleep()) { equipMeleeGear(); return true; }
-            sleepUntil(() -> Rs2Equipment.isWearing(config.damageSpecWeapon()), 1200);
+            boolean equipped = sleepUntil(() -> Rs2Equipment.isWearing(config.damageSpecWeapon()), 1800);
+            if (!equipped) {
+                log("WARNING: " + dmgWeapon + " failed to equip within timeout!");
+                damageSpecUsed = true;
+                equipMeleeGear();
+                return false;
+            }
         }
 
         status = "Phase 3 damage spec: " + dmgWeapon;
+        log("Damage spec: weapon equipped, enabling spec (" + (specEnergyRaw / 10) + "% energy, " + specCost + "% cost)");
 
-        // Enable spec and attack
+        // ── Step 2: Enable special attack ──
+        // Switch to combat tab so the spec bar widget is visible
         Rs2Tab.switchTo(InterfaceTab.COMBAT);
         sleepUntil(() -> Rs2Tab.getCurrentTab() == InterfaceTab.COMBAT, 1200);
-        Rs2Combat.setSpecState(true, specCost * 10);
+        sleep(100); // brief wait for widget render
+
+        // Try to toggle spec — retry up to 3 times if it fails
+        boolean specEnabled = false;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (Rs2Combat.getSpecState()) {
+                specEnabled = true;
+                break;
+            }
+            boolean result = Rs2Combat.setSpecState(true, specCostRaw);
+            log("Damage spec: setSpecState attempt " + (attempt + 1) + " returned " + result);
+            if (result) {
+                sleep(100);
+                if (Rs2Combat.getSpecState()) {
+                    specEnabled = true;
+                    break;
+                }
+            }
+            sleep(300); // wait before retry
+        }
+
+        if (!specEnabled) {
+            log("WARNING: Failed to enable special attack after 3 attempts! Spec widget may be hidden.");
+            // Fall through and attack normally — don't block combat
+            damageSpecUsed = true;
+            equipMeleeGear();
+            return false;
+        }
+
         if (tickSleep()) { equipMeleeGear(); return true; }
 
+        // ── Step 3: Attack with spec ──
+        log("Damage spec: spec enabled, attacking Sire!");
         Rs2Npc.interact(sire, "attack");
         tickSleep();
 
-        // Wait for hit
-        sleepUntil(() -> Microbot.getClient().getLocalPlayer() != null
-                && Microbot.getClient().getLocalPlayer().getAnimation() != -1, 1800);
+        // Wait for attack animation
+        sleepUntil(() -> {
+            Player p = Microbot.getClient().getLocalPlayer();
+            return p != null && p.getAnimation() != -1;
+        }, 1800);
         tickSleep();
 
-        log("Phase 3 damage spec landed with " + dmgWeapon);
-
-        // Switch back to main weapon if no more spec energy
-        int energyAfter = Microbot.getClient().getVarpValue(300) / 10;
-        if (energyAfter < specCost) {
-            equipMeleeGear();
+        // ── Verify spec energy was consumed ──
+        int energyAfterRaw = Microbot.getClient().getVarpValue(300);
+        if (energyAfterRaw < specEnergyRaw) {
+            log("Phase 3 damage spec LANDED with " + dmgWeapon
+                    + " (energy: " + (specEnergyRaw / 10) + "% → " + (energyAfterRaw / 10) + "%)");
+        } else {
+            log("WARNING: Spec energy unchanged after attack — spec may not have fired!"
+                    + " (energy: " + (specEnergyRaw / 10) + "% → " + (energyAfterRaw / 10) + "%)");
         }
+
+        damageSpecUsed = true;
+
+        // ── Switch back to main weapon ──
+        equipMeleeGear();
         return true;
     }
 
@@ -1574,7 +1693,9 @@ public class SireScript extends Script {
         if (currentPhase > 0) {
             status = "Phase " + currentPhase + " — waiting for Sire NPC...";
             // Still eat/pot while waiting
-            Rs2Player.eatAt(config.eatAtHpPercent());
+            if (!Rs2Player.eatAt(config.eatAtHpPercent()) && getHpPercent() <= config.eatAtHpPercent()) {
+                consumeOneFood();
+            }
             drinkPrayerPotion();
             return;
         }
@@ -1612,47 +1733,65 @@ public class SireScript extends Script {
     private void lootItems() {
         togglePrayers(false);
 
-        // Eat food to make room in inventory
+        // ── Eat food to make room in inventory (handles both eat-food AND brews) ──
         if (Rs2Inventory.isFull()) {
-            boolean hasFood = !Rs2Inventory.getInventoryFood().isEmpty();
-            if (hasFood) {
-                Rs2Player.eatAt(100);
-                tickSleep();
+            if (!consumeOneFood()) {
+                log("Inventory full and no food to consume — cannot loot!");
             }
         }
 
-        LootingParameters params = new LootingParameters(
-                config.lootPriceThreshold(),
-                Integer.MAX_VALUE,
-                20,
-                1,
-                0,
-                false,
-                false
-        );
+        // ── Value-based looting ──
+        if (!Rs2Inventory.isFull()) {
+            LootingParameters params = new LootingParameters(
+                    config.lootPriceThreshold(),
+                    Integer.MAX_VALUE,
+                    20,
+                    1,
+                    0,
+                    false,
+                    false
+            );
+            Rs2GroundItem.lootItemBasedOnValue(params);
+            sleep(600);
+        }
 
-        Rs2GroundItem.lootItemBasedOnValue(params);
+        // ── Always loot unique drops — eat to make space if needed ──
+        String[] uniqueDrops = {
+                "Unsired", "Abyssal whip", "Abyssal dagger",
+                "Bludgeon claw", "Bludgeon spine", "Bludgeon axon",
+                "Abyssal orphan", "Jar of miasma", "Abyssal head"
+        };
+        for (String drop : uniqueDrops) {
+            if (Rs2GroundItem.exists(drop, 20)) {
+                if (Rs2Inventory.isFull()) {
+                    if (!consumeOneFood()) {
+                        log("Inventory full, can't make space for unique drop: " + drop);
+                        break; // no food left, can't free more slots
+                    }
+                }
+                Rs2GroundItem.loot(drop, 20);
+                sleep(600);
+            }
+        }
 
-        // Always loot unique drops
-        Rs2GroundItem.loot("Unsired", 20);
-        Rs2GroundItem.loot("Abyssal whip", 20);
-        Rs2GroundItem.loot("Abyssal dagger", 20);
-        Rs2GroundItem.loot("Bludgeon claw", 20);
-        Rs2GroundItem.loot("Bludgeon spine", 20);
-        Rs2GroundItem.loot("Bludgeon axon", 20);
-        Rs2GroundItem.loot("Abyssal orphan", 20);
-        Rs2GroundItem.loot("Jar of miasma", 20);
-        Rs2GroundItem.loot("Abyssal head", 20);
-
-        sleep(600, 1200);
+        sleep(300, 600);
 
         // Check if done looting
         if (!Rs2GroundItem.isItemBasedOnValueOnGround(config.lootPriceThreshold(), 20)) {
-            // Pick up supply drops
-            Rs2GroundItem.loot("Shark", 20);
-            Rs2GroundItem.loot("Prayer potion", 20);
-            Rs2GroundItem.loot("Super combat potion", 20);
-            sleep(600);
+            // ── Supply drops — only pick up if we have space ──
+            String[] supplyDrops = {"Shark", "Prayer potion", "Super combat potion"};
+            for (String supply : supplyDrops) {
+                if (Rs2GroundItem.exists(supply, 20)) {
+                    if (Rs2Inventory.isFull()) {
+                        if (!consumeOneFood()) {
+                            log("Inventory full, skipping supply drop: " + supply);
+                            break;
+                        }
+                    }
+                    Rs2GroundItem.loot(supply, 20);
+                    sleep(600);
+                }
+            }
 
             state = SireState.IDLE;
             status = "Loot complete — returning to start";
@@ -1664,25 +1803,16 @@ public class SireScript extends Script {
     }
 
     /**
-     * After kill+loot, walk back to a starting position for the next kill.
-     * Randomly picks either Row 1 (left or right) or the stun tile.
-     * This keeps the bot near the optimal position when the Sire respawns.
+     * After kill+loot, walk back to stun tile for the next kill.
+     * The stun tile is the optimal position — ready to Shadow Barrage
+     * immediately when the Sire respawns.
      */
     private void returnToStartPosition() {
         Player player = Microbot.getClient().getLocalPlayer();
         if (player == null) return;
 
-        WorldPoint target;
-        double roll = Math.random();
-        if (roll < 0.5) {
-            // Go to stun tile (ready to Shadow Barrage immediately on respawn)
-            target = STUN_TILE;
-            status = "Returning to stun tile";
-        } else {
-            // Go to Row 1 (random left/right)
-            target = Math.random() < 0.5 ? ROW1_LEFT : ROW1_RIGHT;
-            status = "Returning to Row 1";
-        }
+        WorldPoint target = STUN_TILE;
+        status = "Returning to stun tile";
 
         log("Post-kill: returning to " + target);
         walkToSafe(target);
@@ -1867,6 +1997,10 @@ public class SireScript extends Script {
         explosionIncoming = false;
         explosionHappened = false;
         postExplosionMiasmaCount = 0;
+        p3AttackCount = 0;
+        explosionImminent = false;
+        lastPlayerLocation = null;
+        damageSpecUsed = false;
         sireSpawnPos = null;
         firstStunOnSleeping = false;
         sireEngaged = false;
@@ -1906,10 +2040,63 @@ public class SireScript extends Script {
      */
     private boolean hasHealingSupplies() {
         if (!Rs2Inventory.getInventoryFood().isEmpty()) return true;
-        // Also count Saradomin brews as healing supplies
+        // Also count Saradomin brews and other healing potions as supplies
         return Rs2Inventory.hasItem("Saradomin brew")
                 || Rs2Inventory.hasItem("Guthix rest")
-                || Rs2Inventory.hasItem("Blighted food");
+                || Rs2Inventory.hasItem("Blighted food")
+                || Rs2Inventory.hasItem("Anglerfish");
+    }
+
+    /**
+     * Count all healing items in inventory — both "eat" food AND brews/healing potions.
+     * Used for accurate supply tracking in needsBanking().
+     */
+    private int countAllHealing() {
+        int count = Rs2Inventory.getInventoryFood().size();
+        // Saradomin brews have "Drink" action, not "Eat", so getInventoryFood() misses them.
+        // Count each brew item as a healing supply.
+        if (Rs2Inventory.hasItem("Saradomin brew")) {
+            count += Rs2Inventory.count("Saradomin brew");
+        }
+        if (Rs2Inventory.hasItem("Blighted food")) {
+            count += Rs2Inventory.count("Blighted food");
+        }
+        return count;
+    }
+
+    /**
+     * Consume one food item to free an inventory slot.
+     * Handles both "eat" action food AND Saradomin brews ("drink" action).
+     * Rs2Player.eatAt() only handles "eat" items, so if only brews remain,
+     * we must drink a brew directly.
+     *
+     * @return true if food was consumed (slot freed), false if nothing available
+     */
+    private boolean consumeOneFood() {
+        // Try normal food first ("eat" action)
+        List<Rs2ItemModel> foods = Rs2Inventory.getInventoryFood();
+        if (!foods.isEmpty()) {
+            Rs2ItemModel food = foods.get(0);
+            boolean consumed = food.getName().toLowerCase().contains("jug of wine")
+                    ? Rs2Inventory.interact(food, "drink")
+                    : Rs2Inventory.interact(food, "eat");
+            if (consumed) {
+                log("Consumed food: " + food.getName());
+                sleep(600); // tick delay for food to process
+                return true;
+            }
+        }
+        // Try Saradomin brew
+        Rs2ItemModel brew = Rs2Inventory.get("Saradomin brew");
+        if (brew != null && !brew.isNoted()) {
+            boolean consumed = Rs2Inventory.interact(brew, "Drink");
+            if (consumed) {
+                log("Consumed brew: " + brew.getName());
+                sleep(600);
+                return true;
+            }
+        }
+        return false;
     }
 
     // ══════════════════════════════════════════════════════
@@ -1937,11 +2124,8 @@ public class SireScript extends Script {
      * Called after looting / before next kill attempt.
      */
     private boolean needsBanking() {
-        int foodCount = Rs2Inventory.getInventoryFood().size();
-        // Count Saradomin brews as food too
-        if (Rs2Inventory.hasItem("Saradomin brew")) {
-            foodCount += Rs2Inventory.count("Saradomin brew");
-        }
+        // Count ALL healing: both "eat" food AND Saradomin brews
+        int foodCount = countAllHealing();
 
         boolean lowFood = foodCount < config.minFood();
 
@@ -1955,6 +2139,8 @@ public class SireScript extends Script {
 
         if (lowFood || lowPrayer || noHealing) {
             log("needsBanking: food=" + foodCount + "/" + config.minFood()
+                    + " (eat=" + Rs2Inventory.getInventoryFood().size()
+                    + " brews=" + Rs2Inventory.count("Saradomin brew") + ")"
                     + ", prayerDoses=" + prayerDoses + "/" + config.minPrayerDoses()
                     + ", noHealing=" + noHealing);
             return true;
@@ -2134,7 +2320,7 @@ public class SireScript extends Script {
             sleep(600);
 
             // Eat to full HP and drink prayer pot if needed
-            Rs2Player.eatAt(100);
+            if (!Rs2Player.eatAt(100)) { consumeOneFood(); }
             drinkPrayerPotion();
 
             log("Banking complete — equipment=" + hasEquipment + ", inventory=" + hasInventory);
