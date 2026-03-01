@@ -2,8 +2,13 @@ package net.runelite.client.plugins.microbot.nirisire;
 
 public enum SireState {
     IDLE,
-    BANKING,           // placeholder
-    TRAVELING,         // placeholder
+
+    // Banking & travel
+    TELEPORTING_OUT,   // Teleporting away from boss arena (house tab, etc.)
+    WALKING_TO_BANK,   // Walking to the nearest bank
+    BANKING,           // Interacting with bank — restocking via Inventory Setups
+    TELEPORTING_BACK,  // Using POH fairy ring / teleport to return
+    WALKING_TO_SIRE,   // Walking from fairy ring to the SW room
 
     // Phase 1: Vent destruction
     STUNNING_SIRE,     // Casting Shadow Barrage
