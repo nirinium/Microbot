@@ -32,6 +32,9 @@ public interface SireConfig extends Config {
     @ConfigSection(name = "Banking", description = "Banking & walk-back settings", position = 5)
     String bankingSection = "banking";
 
+    @ConfigSection(name = "Tuning", description = "Performance tuning & debug settings", position = 6)
+    String tuningSection = "tuning";
+
     // ── Combat ──────────────────────────────────────────
 
     @ConfigItem(
@@ -353,5 +356,75 @@ public interface SireConfig extends Config {
     )
     default boolean usePohFairyRing() {
         return true;
+    }
+
+    // ── Tuning ──────────────────────────────────────────
+
+    @ConfigItem(
+            keyName = "sameTickEatPot",
+            name = "Same-tick eat + pot",
+            description = "Eat food and drink a potion in the same game tick (saves ~600ms per combo)",
+            position = 0,
+            section = tuningSection
+    )
+    default boolean sameTickEatPot() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "clampP3Position",
+            name = "Clamp P3 position",
+            description = "Force player back onto Row 2/3 if they drift off during Phase 3 (prevents tentacle damage)",
+            position = 1,
+            section = tuningSection
+    )
+    default boolean clampP3Position() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "ventAttackTimeoutMs",
+            name = "Vent attack timeout (ms)",
+            description = "Max time to wait for vent death after attacking. Lower = faster vent-to-vent transitions but more aggressive.",
+            position = 2,
+            section = tuningSection
+    )
+    @Range(min = 500, max = 10000)
+    default int ventAttackTimeoutMs() {
+        return 3000;
+    }
+
+    @ConfigItem(
+            keyName = "ventPollIntervalMs",
+            name = "Vent poll interval (ms)",
+            description = "How often to check for vent death during attack. Lower = faster detection but higher CPU.",
+            position = 3,
+            section = tuningSection
+    )
+    @Range(min = 10, max = 500)
+    default int ventPollIntervalMs() {
+        return 50;
+    }
+
+    @ConfigItem(
+            keyName = "ventInnerLoop",
+            name = "Vent inner loop",
+            description = "Attack all 4 vents in a tight inner loop without returning to main loop (fastest). Disable if vents get stuck.",
+            position = 4,
+            section = tuningSection
+    )
+    default boolean ventInnerLoop() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "debugLogging",
+            name = "Debug logging",
+            description = "Enable verbose debug logging for troubleshooting (check RuneLite log)",
+            position = 5,
+            section = tuningSection
+    )
+    default boolean debugLogging() {
+        return false;
     }
 }
