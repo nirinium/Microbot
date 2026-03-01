@@ -74,7 +74,7 @@ public class TormentedDemonScript extends Script {
     }
 
     private enum BankStep {
-        RESTORE, OPEN_BANK, LOAD_SETUP
+        TRAVEL_TO_FEROX, RESTORE, OPEN_BANK, LOAD_SETUP
     }
 
     private enum TravelStep {
@@ -93,16 +93,15 @@ public class TormentedDemonScript extends Script {
 
     private Rs2NpcModel currentTarget;
     private HeadIcon lastKnownHeadIcon;
-    private BankStep bankStep = BankStep.RESTORE;
+    private BankStep bankStep = BankStep.TRAVEL_TO_FEROX;
     private TravelStep travelStep = TravelStep.TELEPORT;
     private boolean hasLooted = false;
     private String lastLogMessage = "";
 
     // Spec & punish tracking
-    private long lastMeleeAttackTick = 0;
+    private volatile long shieldBrokenTick = 0;
     private long lastPunishTick = 0;
-    private static final int SHIELD_BREAK_DELAY_TICKS = 2;
-    private static final int SHIELD_DOWN_DURATION_TICKS = 25; // ~15 seconds
+    private static final int SHIELD_DOWN_DURATION_TICKS = 25; // ~15 seconds after shield break animation
     private static final int PUNISH_COOLDOWN_TICKS = 8; // minimum ticks between punish swaps
 
     // ─── Entry Point ────────────────────────────────────────────────────────────
@@ -166,8 +165,28 @@ public class TormentedDemonScript extends Script {
         }
 
         switch (bankStep) {
+            case TRAVEL_TO_FEROX:
+                statusText = "Travelling to Ferox...";
+                if (playerLocation().distanceTo(FEROX_AREA) <= 20) {
+                    bankStep = BankStep.RESTORE;
+                    break;
+                }
+                // Try to teleport using Ring of Dueling
+                teleportToFerox();
+                if (playerLocation().distanceTo(FEROX_AREA) <= 20) {
+                    bankStep = BankStep.RESTORE;
+                } else {
+                    logOnce("Cannot reach Ferox Enclave — no Ring of Dueling?");
+                }
+                break;
+
             case RESTORE:
                 statusText = "Restoring at Ferox pool...";
+                // If we're too far from Ferox, go back to travel step
+                if (playerLocation().distanceTo(FEROX_AREA) > 30) {
+                    bankStep = BankStep.TRAVEL_TO_FEROX;
+                    break;
+                }
                 int hp = Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS);
                 int maxHp = Microbot.getClient().getRealSkillLevel(Skill.HITPOINTS);
                 int pray = Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER);
@@ -180,6 +199,11 @@ public class TormentedDemonScript extends Script {
                             int curPray = Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER);
                             return curHp >= maxHp && curPray >= maxPray;
                         }, 5000);
+                    } else {
+                        // Pool not found — try walking closer to Ferox
+                        Rs2Walker.walkTo(FEROX_AREA, 4);
+                        sleepUntil(() -> playerLocation().distanceTo(FEROX_AREA) <= 6, 5000);
+                        break;
                     }
                 }
                 bankStep = BankStep.OPEN_BANK;
@@ -192,13 +216,24 @@ public class TormentedDemonScript extends Script {
                     sleep(300, 500);
                     bankStep = BankStep.LOAD_SETUP;
                 } else {
-                    Rs2Bank.openBank();
-                    sleepUntil(Rs2Bank::isOpen, 5000);
+                    if (!Rs2Bank.isNearBank(15)) {
+                        // Walk to the nearest bank if we're not close enough
+                        Rs2Bank.walkToBank();
+                        sleep(600, 1000);
+                    } else {
+                        Rs2Bank.openBank();
+                        sleepUntil(Rs2Bank::isOpen, 5000);
+                    }
                 }
                 break;
 
             case LOAD_SETUP:
                 statusText = "Loading gear & inventory...";
+                if (!Rs2Bank.isOpen()) {
+                    // Bank closed unexpectedly — reopen it
+                    bankStep = BankStep.OPEN_BANK;
+                    break;
+                }
                 Rs2InventorySetup setup = new Rs2InventorySetup(bankSetup, mainScheduledFuture);
                 boolean equipOk = setup.loadEquipment();
                 boolean invOk = setup.loadInventory();
@@ -206,7 +241,7 @@ public class TormentedDemonScript extends Script {
                 if (equipOk && invOk) {
                     Rs2Bank.closeBank();
                     sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
-                    bankStep = BankStep.RESTORE;
+                    bankStep = BankStep.TRAVEL_TO_FEROX;
                     botState = BotState.TRAVELLING;
                     logOnce("Banking complete, heading to demons.");
                 } else {
@@ -293,6 +328,7 @@ public class TormentedDemonScript extends Script {
             disableAllPrayers();
             currentTarget = null;
             teleportToFerox();
+            bankStep = BankStep.RESTORE;
             botState = BotState.BANKING;
             return;
         }
@@ -374,13 +410,6 @@ public class TormentedDemonScript extends Script {
             }
         }
 
-        // ── Track melee hits for shield timing ──
-        if (activeCombatStyle == CombatStyle.MELEE && currentTarget != null && !currentTarget.isDead()) {
-            if (Rs2Player.getInteracting() != null) {
-                lastMeleeAttackTick = Microbot.getClient().getTickCount();
-            }
-        }
-
         // ── Spec / Punish weapons (melee only) ──
         if (activeCombatStyle == CombatStyle.MELEE && currentTarget != null && !currentTarget.isDead()) {
             // Spec with Burning Claws (or configured spec weapon)
@@ -414,12 +443,27 @@ public class TormentedDemonScript extends Script {
         }
 
         // ── Thralls ──
-        if (config.useThralls() && !Rs2Thrall.isActive()) {
-            Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
-            if (bestThrall != null) {
-                if (Rs2Thrall.cast(bestThrall)) {
-                    logOnce("Summoned thrall: " + bestThrall.getName());
-                    sleep(600, 800);
+        if (config.useThralls()) {
+            if (Rs2Thrall.isActive()) {
+                // Thrall is active or on cooldown — nothing to do
+            } else {
+                Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
+                if (bestThrall != null) {
+                    logOnce("Attempting to summon thrall: " + bestThrall.getName());
+                    if (Rs2Thrall.cast(bestThrall)) {
+                        logOnce("Summoned thrall: " + bestThrall.getName());
+                        sleep(600, 800);
+                    } else {
+                        logOnce("Thrall cast failed for " + bestThrall.getName() + " — spell may have been interrupted");
+                    }
+                } else {
+                    // Debug: log why no thrall is available
+                    boolean hasBookOfDead = Rs2Inventory.hasItem(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD)
+                            || Rs2Equipment.isWearing(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD);
+                    boolean onArceuus = Rs2Magic.isSpellbook(net.runelite.client.plugins.microbot.util.magic.Rs2Spellbook.ARCEUUS);
+                    logOnce("No castable thrall found — BookOfDead=" + hasBookOfDead
+                            + ", Arceuus=" + onArceuus
+                            + ", Type=" + config.thrallType());
                 }
             }
         }
@@ -785,14 +829,25 @@ public class TormentedDemonScript extends Script {
     // ─── Spec Weapon ────────────────────────────────────────────────────────────
 
     /**
-     * Checks whether the demon's fire shield is currently down (broken by a fire weapon hit).
-     * Shield breaks ~2 ticks after a melee hit with a fire weapon (Emberlight/Arclight/Darklight)
-     * and stays down for ~25 ticks (~15 seconds).
+     * Called by the Plugin when the demon plays its shield-break animation (11399).
+     * This indicates the fire shield has been broken by a fire weapon hit.
+     */
+    public void onShieldBroken() {
+        shieldBrokenTick = Microbot.getClient().getTickCount();
+        logOnce("Demon shield broken! Punish window open.");
+    }
+
+    /**
+     * Checks whether the demon's fire shield is currently down.
+     * Tracked via the NPC's shield-break animation (11399) played by the demon,
+     * rather than by timing player attacks.
+     * Shield stays down for ~25 ticks (~15 seconds) after the animation.
      */
     private boolean isDemonShieldDown() {
+        if (shieldBrokenTick == 0) return false;
         long currentTick = Microbot.getClient().getTickCount();
-        long elapsed = currentTick - lastMeleeAttackTick;
-        return elapsed >= SHIELD_BREAK_DELAY_TICKS && elapsed <= SHIELD_DOWN_DURATION_TICKS;
+        long elapsed = currentTick - shieldBrokenTick;
+        return elapsed >= 0 && elapsed <= SHIELD_DOWN_DURATION_TICKS;
     }
 
     /**
@@ -932,9 +987,9 @@ public class TormentedDemonScript extends Script {
         activeCombatStyle = null;
         killCount = 0;
         hasLooted = false;
-        bankStep = BankStep.RESTORE;
+        bankStep = BankStep.TRAVEL_TO_FEROX;
         travelStep = TravelStep.TELEPORT;
-        lastMeleeAttackTick = 0;
+        shieldBrokenTick = 0;
         lastPunishTick = 0;
         statusText = "Stopped.";
     }

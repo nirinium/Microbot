@@ -79,6 +79,11 @@ public class TormentedDemonPlugin extends Plugin {
     private static final int FIRE_BOMB_GFX = 2856;
 
     /**
+     * Shield break animation — played when the demon's fire shield is hit and goes down.
+     */
+    private static final int SHIELD_BREAK_ANIM = 11399;
+
+    /**
      * Fire bomb AoE radius (Chebyshev). The bomb hits a 3×3 area (center ± 1).
      */
     private static final int FIRE_BOMB_AOE_RADIUS = 1;
@@ -317,16 +322,14 @@ public class TormentedDemonPlugin extends Plugin {
     // ─── Prayer Switching ───────────────────────────────────────────────────────
 
     /**
-     * Reacts to tormented demon attack animations to switch protection prayers.
-     * <p>
-     * Per the OSRS Wiki:
-     * - Demons change attack style after each fire bomb attack
-     * - After melee, the next style could be magic or ranged (must react)
-     * - We react to the actual attack animation rather than guessing
+     * Reacts to tormented demon animations for:
+     * <ul>
+     *   <li>Protection prayer switching (attack animations)</li>
+     *   <li>Shield break detection for Dharok punish mechanic (animation 11399)</li>
+     * </ul>
      */
     @Subscribe
     public void onAnimationChanged(AnimationChanged event) {
-        if (!config.enableDefensivePrayer()) return;
         if (!(event.getActor() instanceof NPC)) return;
 
         NPC npc = (NPC) event.getActor();
@@ -343,6 +346,14 @@ public class TormentedDemonPlugin extends Plugin {
         if (!isOurTarget && !isTargetingUs) return;
 
         int anim = npc.getAnimation();
+
+        // Shield break detection (for Dharok punish) — always track regardless of prayer settings
+        if (anim == SHIELD_BREAK_ANIM) {
+            script.onShieldBroken();
+        }
+
+        // Prayer switching — only if defensive prayer is enabled
+        if (!config.enableDefensivePrayer()) return;
 
         switch (anim) {
             case MELEE_ATTACK_ANIM:
