@@ -117,6 +117,14 @@ public class SireOverlay extends OverlayPanel {
                             .right("I (pre-explosion)")
                             .rightColor(Color.ORANGE)
                             .build());
+                    // Show P3 attack counter for explosion prediction
+                    int attacks = script.getP3AttackCount();
+                    boolean imminent = script.isExplosionImminent();
+                    panelComponent.getChildren().add(LineComponent.builder()
+                            .left("Attacks:")
+                            .right(attacks + (imminent ? " ⚠ IMMINENT" : ""))
+                            .rightColor(imminent ? Color.RED : Color.WHITE)
+                            .build());
                 }
             }
 
