@@ -13,11 +13,13 @@ import java.awt.*;
 public class SireOverlay extends OverlayPanel {
 
     private final SirePlugin plugin;
+    private final SireConfig config;
 
     @Inject
-    SireOverlay(SirePlugin plugin) {
+    SireOverlay(SirePlugin plugin, SireConfig config) {
         super(plugin);
         this.plugin = plugin;
+        this.config = config;
         setPosition(OverlayPosition.TOP_LEFT);
         setNaughty();
     }
@@ -125,6 +127,89 @@ public class SireOverlay extends OverlayPanel {
                             .right(attacks + (imminent ? " ⚠ IMMINENT" : ""))
                             .rightColor(imminent ? Color.RED : Color.WHITE)
                             .build());
+                }
+            }
+
+            // ── Dodge Debug Overlay ──
+            if (config.dodgeDebugOverlay() && script.getDodgeStartTimeMs() > 0) {
+                long elapsed = script.getDodgeEndTimeMs() > 0
+                        ? (script.getDodgeEndTimeMs() - script.getDodgeStartTimeMs())
+                        : (System.currentTimeMillis() - script.getDodgeStartTimeMs());
+                // Only show for 10 seconds after dodge completes (or always while dodging)
+                boolean dodgeActive = script.getState() == SireState.DODGING_EXPLOSION;
+                boolean recentDodge = script.getDodgeEndTimeMs() > 0
+                        && (System.currentTimeMillis() - script.getDodgeEndTimeMs()) < 10_000;
+
+                if (dodgeActive || recentDodge) {
+                    panelComponent.getChildren().add(TitleComponent.builder()
+                            .text("─ Dodge Debug ─")
+                            .color(dodgeActive ? Color.RED : Color.GRAY)
+                            .build());
+
+                    // Result
+                    if (script.getDodgeEndTimeMs() > 0) {
+                        panelComponent.getChildren().add(LineComponent.builder()
+                                .left("Result:")
+                                .right(script.isLastDodgeSucceeded() ? "SUCCESS" : "FAILED")
+                                .rightColor(script.isLastDodgeSucceeded() ? Color.GREEN : Color.RED)
+                                .build());
+                    } else {
+                        panelComponent.getChildren().add(LineComponent.builder()
+                                .left("Result:")
+                                .right("DODGING...")
+                                .rightColor(Color.YELLOW)
+                                .build());
+                    }
+
+                    // Time
+                    panelComponent.getChildren().add(LineComponent.builder()
+                            .left("Time:")
+                            .right(elapsed + "ms")
+                            .rightColor(elapsed > 1200 ? Color.RED : elapsed > 600 ? Color.ORANGE : Color.GREEN)
+                            .build());
+
+                    // Clicks breakdown
+                    panelComponent.getChildren().add(LineComponent.builder()
+                            .left("Clicks:")
+                            .right(script.getDodgeClicksFired() + " total")
+                            .build());
+                    panelComponent.getChildren().add(LineComponent.builder()
+                            .left("  Canvas:")
+                            .right(String.valueOf(script.getDodgeCanvasClicks()))
+                            .rightColor(Color.CYAN)
+                            .build());
+                    panelComponent.getChildren().add(LineComponent.builder()
+                            .left("  Minimap:")
+                            .right(String.valueOf(script.getDodgeMinimapClicks()))
+                            .rightColor(Color.YELLOW)
+                            .build());
+                    panelComponent.getChildren().add(LineComponent.builder()
+                            .left("  Fallback:")
+                            .right(String.valueOf(script.getDodgeFallbackClicks()))
+                            .rightColor(script.getDodgeFallbackClicks() > 0 ? Color.ORANGE : Color.WHITE)
+                            .build());
+
+                    // Tiles
+                    if (script.getDodgeLandingTile() != null) {
+                        panelComponent.getChildren().add(LineComponent.builder()
+                                .left("Landing:")
+                                .right("(" + script.getDodgeLandingTile().getX() + "," + script.getDodgeLandingTile().getY() + ")")
+                                .build());
+                    }
+                    if (script.getExplosionDodgeTarget() != null) {
+                        panelComponent.getChildren().add(LineComponent.builder()
+                                .left("Target:")
+                                .right("(" + script.getExplosionDodgeTarget().getX() + "," + script.getExplosionDodgeTarget().getY() + ")")
+                                .rightColor(Color.CYAN)
+                                .build());
+                    }
+                    if (script.getDodgePlayerFinalTile() != null) {
+                        panelComponent.getChildren().add(LineComponent.builder()
+                                .left("Final:")
+                                .right("(" + script.getDodgePlayerFinalTile().getX() + "," + script.getDodgePlayerFinalTile().getY() + ")")
+                                .rightColor(script.isLastDodgeSucceeded() ? Color.GREEN : Color.RED)
+                                .build());
+                    }
                 }
             }
 

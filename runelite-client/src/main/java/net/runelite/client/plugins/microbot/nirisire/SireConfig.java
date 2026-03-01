@@ -35,6 +35,9 @@ public interface SireConfig extends Config {
     @ConfigSection(name = "Tuning", description = "Performance tuning & debug settings", position = 6)
     String tuningSection = "tuning";
 
+    @ConfigSection(name = "Explosion Dodge", description = "Phase 3 explosion dodge tuning — adjust in real-time to debug dodge failures", position = 7, closedByDefault = false)
+    String explosionDodgeSection = "explosionDodge";
+
     // ── Combat ──────────────────────────────────────────
 
     @ConfigItem(
@@ -391,7 +394,7 @@ public interface SireConfig extends Config {
     )
     @Range(min = 500, max = 10000)
     default int ventAttackTimeoutMs() {
-        return 3000;
+        return 2000;
     }
 
     @ConfigItem(
@@ -426,5 +429,90 @@ public interface SireConfig extends Config {
     )
     default boolean debugLogging() {
         return false;
+    }
+
+    // ── Explosion Dodge ─────────────────────────────────────────
+
+    @ConfigItem(
+            keyName = "dodgeStaggeredClicks",
+            name = "Staggered walk clicks",
+            description = "Number of scheduled walk commands to fire across the dodge window (from animation detection). More clicks = more chances to land after teleport.",
+            position = 0,
+            section = explosionDodgeSection
+    )
+    @Range(min = 1, max = 20)
+    default int dodgeStaggeredClicks() {
+        return 7;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeStaggeredIntervalMs",
+            name = "Staggered interval (ms)",
+            description = "Delay between each staggered walk command. Lower = denser spam. Total dodge window = clicks × interval.",
+            position = 1,
+            section = explosionDodgeSection
+    )
+    @Range(min = 50, max = 600)
+    default int dodgeStaggeredIntervalMs() {
+        return 150;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeImmediateSpamClicks",
+            name = "Immediate spam clicks",
+            description = "Number of tight back-to-back walk commands in the main loop when explosion is detected. These fire with minimal delay.",
+            position = 2,
+            section = explosionDodgeSection
+    )
+    @Range(min = 1, max = 20)
+    default int dodgeImmediateSpamClicks() {
+        return 5;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeImmediateSpamDelayMs",
+            name = "Immediate spam delay (ms)",
+            description = "Sleep between each immediate spam click. Lower = faster but may overwhelm the client.",
+            position = 3,
+            section = explosionDodgeSection
+    )
+    @Range(min = 0, max = 200)
+    default int dodgeImmediateSpamDelayMs() {
+        return 50;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeTimeoutMs",
+            name = "Dodge timeout (ms)",
+            description = "Max time to wait for the player to reach safety after explosion teleport. Explosion fires at ~1200ms; add buffer for safety.",
+            position = 4,
+            section = explosionDodgeSection
+    )
+    @Range(min = 600, max = 3000)
+    default int dodgeTimeoutMs() {
+        return 1800;
+    }
+
+    @ConfigItem(
+            keyName = "explosionWarnThreshold",
+            name = "Explosion warn threshold",
+            description = "After this many P3 regular attacks, flag explosion as imminent and pre-enable run. Sire typically does 4 attacks before exploding.",
+            position = 5,
+            section = explosionDodgeSection
+    )
+    @Range(min = 1, max = 6)
+    default int explosionWarnThreshold() {
+        return 3;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeDebugOverlay",
+            name = "Dodge debug overlay",
+            description = "Show real-time dodge diagnostics on the overlay: click counts, target tile, timing, and method used.",
+            position = 6,
+            section = explosionDodgeSection
+    )
+    default boolean dodgeDebugOverlay() {
+        return true;
     }
 }

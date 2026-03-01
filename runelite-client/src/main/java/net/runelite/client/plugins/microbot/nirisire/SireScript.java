@@ -31,6 +31,7 @@ import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
+import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.skillcalculator.skills.MagicAction;
 
@@ -107,13 +108,13 @@ public class SireScript extends Script {
     private static final WorldPoint ROW3_LEFT = new WorldPoint(2969, 4770, SW_PLANE);
     private static final WorldPoint ROW3_RIGHT = new WorldPoint(2971, 4770, SW_PLANE);
 
-    // Explosion dodge: player is always teleported to western tile of Row 2.
-    // Wiki: "The Sire teleports the player to the western tile of Row 2.
-    //        Two ticks later it explodes, dealing up to 96 damage if the
-    //        player is within the blast radius."
-    // Dodge target is always ROW3_LEFT (same X, 2 tiles south).
-    private static final WorldPoint EXPLOSION_TELEPORT_LANDING = ROW2_LEFT; // (2969, 4772)
-    private static final WorldPoint EXPLOSION_DODGE_TARGET = ROW3_LEFT;     // (2969, 4770)
+    // Explosion dodge: the Sire teleports the player to any tile within 1 tile
+    // of itself. Two ticks later it explodes, dealing up to 96 damage if the
+    // player is within the blast radius.
+    // The dodge target is computed dynamically based on the player's actual
+    // post-teleport position — always the closest Row 3 safe tile (south).
+    // Teleport detection uses sudden position change (>= 2 tiles in 1 tick)
+    // while in Phase 3, rather than checking for a single hardcoded landing tile.
 
     // Vent stand-tiles: optimal positions to hit respiratory systems with a 10-range weapon.
     // Derived from unlabelled wiki tile markers in the SW room (regionId 11850).
@@ -174,6 +175,9 @@ public class SireScript extends Script {
     @Getter
     private final Set<WorldPoint> miasmaPools = new HashSet<>();
     private volatile long lastMiasmaCleanTick = 0;
+    // Stuck detection: count consecutive dodge attempts without moving off miasma
+    private volatile int miasmaDodgeAttempts = 0;
+    private static final int MAX_MIASMA_DODGE_ATTEMPTS = 5;
 
     // Anti-poison cooldown — prevent drinking multiple doses before the varp updates
     private volatile long lastAntiPoisonTick = 0;
@@ -183,6 +187,11 @@ public class SireScript extends Script {
     @Getter
     @Setter
     private volatile boolean explosionIncoming = false;
+    // Dynamic dodge target — computed from actual post-teleport position each explosion.
+    // The Sire can teleport the player to any tile within 1 tile of itself, so the
+    // best escape route varies. Always picks the closest Row 3 tile (south).
+    @Getter
+    private volatile WorldPoint explosionDodgeTarget = ROW3_LEFT; // default fallback
     // Tick when explosion dodge completed — used to keep player on Row 3 briefly after.
     // During this window, miasma dodge also prefers Row 3 over Row 2.
     private volatile long explosionDodgeTick = 0;
@@ -202,11 +211,29 @@ public class SireScript extends Script {
     private volatile int p3AttackCount = 0;
     @Getter
     private volatile boolean explosionImminent = false;
-    // After this many P3 regular attacks, flag explosion as imminent.
-    // Sire typically does 4 attacks before explosion, so 3 gives ~1 attack lead.
-    private static final int P3_EXPLOSION_WARN_THRESHOLD = 3;
     // Track last known player location for tick-perfect teleport detection
     private volatile WorldPoint lastPlayerLocation = null;
+
+    // ── Explosion Dodge Diagnostics (for real-time overlay) ────
+    // These are updated during each dodge attempt and read by the overlay.
+    @Getter
+    private volatile int dodgeClicksFired = 0;         // total walk commands fired this dodge
+    @Getter
+    private volatile int dodgeCanvasClicks = 0;        // clicks that used canvas walk
+    @Getter
+    private volatile int dodgeMinimapClicks = 0;       // clicks that used minimap walk
+    @Getter
+    private volatile int dodgeFallbackClicks = 0;      // clicks that used Rs2Walker.walkTo fallback
+    @Getter
+    private volatile long dodgeStartTimeMs = 0;        // System.currentTimeMillis when dodge started
+    @Getter
+    private volatile long dodgeEndTimeMs = 0;          // when player reached safety (0 = still dodging)
+    @Getter
+    private volatile boolean lastDodgeSucceeded = true; // did we reach the target?
+    @Getter
+    private volatile WorldPoint dodgeLandingTile = null; // where the player actually landed after teleport
+    @Getter
+    private volatile WorldPoint dodgePlayerFinalTile = null; // where the player ended up after dodge
 
     // Vent hit detection — set by HitsplatApplied on lung NPCs for instant vent-to-vent transitions
     private volatile boolean ventHitLanded = false;
@@ -242,6 +269,7 @@ public class SireScript extends Script {
         sirePanicking = false;
         miasmaIncoming = false;
         explosionIncoming = false;
+        explosionDodgeTarget = ROW3_LEFT;
         explosionHappened = false;
         postExplosionMiasmaCount = 0;
         p3AttackCount = 0;
@@ -349,15 +377,16 @@ public class SireScript extends Script {
     }
 
     /**
-     * Called when Phase 3 explosion teleport is detected.
-     * Wiki: Player is always teleported to the western tile of Row 2 (2969, 4772).
-     * Two ticks later the explosion fires. Spam-click Row 3 immediately.
+     * Called when Phase 3 explosion teleport is detected (via Sire animation).
+     * The Sire can teleport the player to ANY tile within 1 tile of itself.
+     * Two ticks later the explosion fires. Spam-click the nearest Row 3 tile south.
      *
      * The Sire plays ANIM_TELEPORT_PLAYER, then ~1 tick later the player actually
-     * teleports to Row 2. A single immediate walk fires too early and gets cancelled
+     * teleports. A single immediate walk fires too early and gets cancelled
      * by the teleport. Instead we schedule staggered walk commands across the full
      * 2-tick (1200ms) dodge window so at least several fire AFTER the player has
-     * landed on Row 2.
+     * landed. The dodge target is recomputed each tick in onGameTickExplosionCheck()
+     * once we know the player's actual post-teleport position.
      */
     public void onExplosionTeleport() {
         explosionIncoming = true;
@@ -366,21 +395,46 @@ public class SireScript extends Script {
         // Reset P3 attack counter — the explosion just happened, cycle restarts
         p3AttackCount = 0;
         explosionImminent = false;
-        log("Explosion teleport detected — scheduling staggered Row 3 walk spam! (target: " + EXPLOSION_DODGE_TARGET + ")");
+
+        // ── Dodge diagnostics reset ──
+        dodgeClicksFired = 0;
+        dodgeCanvasClicks = 0;
+        dodgeMinimapClicks = 0;
+        dodgeFallbackClicks = 0;
+        dodgeStartTimeMs = System.currentTimeMillis();
+        dodgeEndTimeMs = 0;
+        lastDodgeSucceeded = false;
+        dodgeLandingTile = null;
+        dodgePlayerFinalTile = null;
+
+        // Pre-compute dodge target from current position (will be refined on tick)
+        Player player = Microbot.getClient().getLocalPlayer();
+        if (player != null) {
+            explosionDodgeTarget = computeExplosionDodgeTarget(player.getWorldLocation());
+        }
+        log("Explosion teleport detected — scheduling staggered walk spam! (target: " + explosionDodgeTarget + ")");
 
         // Ensure run is enabled so the 2-tile move completes in 1 tick
-        Rs2Player.toggleRunEnergy(true);
+        // Use non-blocking version — Rs2Player.toggleRunEnergy sleeps 150-300ms
+        enableRunNonBlocking();
 
         // Fire one immediate walk (might land before teleport but costs nothing)
         fireExplosionDodgeWalk();
 
-        // Schedule staggered walk commands every ~150ms across the dodge window.
+        // Schedule staggered walk commands using config-driven count and interval.
         // The teleport resolves ~1 tick (600ms) after the Sire's animation starts.
-        // We need walks firing from ~200ms through ~1100ms to guarantee coverage.
-        int[] delaysMs = {150, 300, 450, 600, 750, 900, 1050};
-        for (int delay : delaysMs) {
+        // We need walks firing across the full dodge window to guarantee coverage.
+        int staggeredClicks = config != null ? config.dodgeStaggeredClicks() : 7;
+        int intervalMs = config != null ? config.dodgeStaggeredIntervalMs() : 150;
+        for (int i = 1; i <= staggeredClicks; i++) {
+            int delay = i * intervalMs;
             scheduledExecutorService.schedule(() -> {
                 try {
+                    // Recompute target — player may have teleported by now
+                    Player p = Microbot.getClient().getLocalPlayer();
+                    if (p != null) {
+                        explosionDodgeTarget = computeExplosionDodgeTarget(p.getWorldLocation());
+                    }
                     fireExplosionDodgeWalk();
                 } catch (Exception ignored) {
                 }
@@ -389,39 +443,88 @@ public class SireScript extends Script {
     }
 
     /**
-     * Fire a single walk command toward the explosion dodge target (ROW3_LEFT).
-     * Uses a DIRECT menu invoke with zero overhead — no toggleRunEnergy sleep,
-     * no camera checks, no minimap fallback. This is the fastest possible walk.
+     * Enable run energy WITHOUT sleeping. Rs2Player.toggleRunEnergy() sleeps 150-300ms
+     * after clicking the orb — unacceptable during the 2-tick explosion dodge window.
+     * This uses a direct widget invoke instead.
+     */
+    private void enableRunNonBlocking() {
+        if (Rs2Player.isRunEnabled()) return;
+        net.runelite.api.widgets.Widget widget = net.runelite.client.plugins.microbot.util.widget.Rs2Widget.getWidget(
+                net.runelite.api.widgets.WidgetInfo.MINIMAP_TOGGLE_RUN_ORB.getId());
+        if (widget == null) return;
+        Microbot.getMouse().click(widget.getCanvasLocation());
+        // No sleep — the orb click is fire-and-forget during explosion dodge
+    }
+
+    /**
+     * Fire a single walk command toward the current explosion dodge target.
+     * Tries multiple approaches to ensure at least ONE walk gets through:
+     * <ol>
+     *   <li>Canvas walk via direct menu invoke (fastest, zero overhead)</li>
+     *   <li>If LocalPoint is null (scene shift after teleport) → minimap walk</li>
+     *   <li>If canvas coords off-screen → minimap walk</li>
+     *   <li>If minimap also fails → try the other Row 3 tile</li>
+     * </ol>
+     * <p>
+     * The target is the dynamic {@link #explosionDodgeTarget} field, which is
+     * recomputed from the player's actual position each time the teleport is
+     * detected or refined on subsequent ticks.
      * Run energy should already be enabled before this is called.
      */
     private void fireExplosionDodgeWalk() {
         try {
+            WorldPoint target = explosionDodgeTarget;
+            if (target == null) target = ROW3_LEFT;
+
+            dodgeClicksFired++;
+
+            if (tryCanvasWalk(target)) { dodgeCanvasClicks++; return; }
+
+            // Canvas walk failed (null LocalPoint or off-screen) — try minimap
+            if (Rs2Walker.walkMiniMap(target)) { dodgeMinimapClicks++; return; }
+
+            // Minimap also failed — try the OTHER Row 3 tile
+            WorldPoint alt = target.equals(ROW3_LEFT) ? ROW3_RIGHT : ROW3_LEFT;
+            if (tryCanvasWalk(alt)) { dodgeCanvasClicks++; return; }
+            if (Rs2Walker.walkMiniMap(alt)) { dodgeMinimapClicks++; return; }
+
+            // Last resort — Rs2Walker.walkTo handles pathfinding
+            dodgeFallbackClicks++;
+            Rs2Walker.walkTo(target);
+        } catch (Exception e) {
+            // Non-critical — best-effort dodge
+        }
+    }
+
+    /**
+     * Attempt a direct canvas walk to the given tile. Returns true if the
+     * walk command was successfully dispatched, false if it couldn't be done
+     * (null LocalPoint, off-screen canvas coords, etc.).
+     */
+    private boolean tryCanvasWalk(WorldPoint target) {
+        try {
             LocalPoint local = LocalPoint.fromWorld(
-                    Microbot.getClient().getTopLevelWorldView(), EXPLOSION_DODGE_TARGET);
-            if (local == null) return;
+                    Microbot.getClient().getTopLevelWorldView(), target);
+            if (local == null) return false;
 
             Point canv = Perspective.localToCanvas(
                     Microbot.getClient(), local,
                     Microbot.getClient().getTopLevelWorldView().getPlane());
+            if (canv == null || canv.getX() < 0 || canv.getY() < 0) return false;
 
-            if (canv != null && canv.getX() >= 0 && canv.getY() >= 0) {
-                // Direct canvas walk — fastest path
-                NewMenuEntry entry = new NewMenuEntry()
-                        .param0(canv.getX())
-                        .param1(canv.getY())
-                        .type(MenuAction.WALK)
-                        .identifier(0)
-                        .itemId(-1)
-                        .option("Walk here");
-                Microbot.doInvoke(entry,
-                        new Rectangle(1, 1, Microbot.getClient().getCanvasWidth(),
-                                Microbot.getClient().getCanvasHeight()));
-            } else {
-                // Tile off-screen — use minimap as fallback (still no run toggle)
-                Rs2Walker.walkMiniMap(EXPLOSION_DODGE_TARGET);
-            }
+            NewMenuEntry entry = new NewMenuEntry()
+                    .param0(canv.getX())
+                    .param1(canv.getY())
+                    .type(MenuAction.WALK)
+                    .identifier(0)
+                    .itemId(-1)
+                    .option("Walk here");
+            Microbot.doInvoke(entry,
+                    new Rectangle(1, 1, Microbot.getClient().getCanvasWidth(),
+                            Microbot.getClient().getCanvasHeight()));
+            return true;
         } catch (Exception e) {
-            // Non-critical — best-effort dodge
+            return false;
         }
     }
 
@@ -452,8 +555,9 @@ public class SireScript extends Script {
      */
     public void onSireP3Attack() {
         p3AttackCount++;
-        log("P3 attack count: " + p3AttackCount + " (threshold: " + P3_EXPLOSION_WARN_THRESHOLD + ")");
-        if (p3AttackCount >= P3_EXPLOSION_WARN_THRESHOLD && !explosionImminent) {
+        int threshold = config != null ? config.explosionWarnThreshold() : 3;
+        log("P3 attack count: " + p3AttackCount + " (threshold: " + threshold + ")");
+        if (p3AttackCount >= threshold && !explosionImminent) {
             explosionImminent = true;
             log("Explosion IMMINENT — pre-enabling run energy, preparing dodge!");
             // Pre-enable run so we're ready the instant the teleport fires
@@ -463,8 +567,12 @@ public class SireScript extends Script {
 
     /**
      * Called every game tick during Phase 3. Provides tick-perfect detection
-     * of the player being teleported to ROW2_LEFT by comparing current position
+     * of the player being teleported near the Sire by comparing current position
      * with the previous tick's position.
+     * <p>
+     * The Sire can teleport the player to ANY tile within 1 tile of itself.
+     * Detection: if the player moved >= 2 tiles in a single tick during P3,
+     * they were likely teleported by the explosion mechanic.
      * <p>
      * Also provides multi-tick follow-up: while explosionIncoming is true and
      * the player hasn't reached safety, keeps firing walk commands every tick
@@ -474,32 +582,47 @@ public class SireScript extends Script {
         WorldPoint currentPos = player.getWorldLocation();
 
         // ── Multi-tick follow-up: keep walking south every tick while dodging ──
-        // This runs ON the client thread so walk commands are processed immediately.
-        // Catches cases where the initial walk failed (camera, scene load, etc.)
-        if (explosionIncoming && currentPos.distanceTo(EXPLOSION_DODGE_TARGET) > 1) {
-            log("TICK-FOLLOWUP: Still dodging! Player at " + currentPos + " → " + EXPLOSION_DODGE_TARGET);
-            Rs2Player.toggleRunEnergy(true);
-            fireExplosionDodgeWalk();
+        // Recompute target from current position each tick (player may still be
+        // mid-teleport or pathing). Runs ON the client thread for immediate processing.
+        if (explosionIncoming) {
+            explosionDodgeTarget = computeExplosionDodgeTarget(currentPos);
+            if (currentPos.distanceTo(explosionDodgeTarget) > 1) {
+                log("TICK-FOLLOWUP: Still dodging! Player at " + currentPos + " → " + explosionDodgeTarget);
+                enableRunNonBlocking();
+                fireExplosionDodgeWalk();
+            }
         }
 
-        // ── Detect sudden teleport to the explosion landing tile ──
-        // Fires even if explosionIncoming is already true (animation detection may
-        // have set it). The walk command here is the most reliable because it runs
-        // on the client thread at the exact tick the teleport resolves.
-        if (currentPos.equals(EXPLOSION_TELEPORT_LANDING)
-                && lastPlayerLocation != null
-                && !lastPlayerLocation.equals(EXPLOSION_TELEPORT_LANDING)) {
-            log("TICK-PERFECT: Player teleported to ROW2_LEFT! Firing immediate dodge walk.");
-            explosionIncoming = true;
-            explosionHappened = true;
-            postExplosionMiasmaCount = 0;
-            p3AttackCount = 0;
-            explosionImminent = false;
+        // ── Detect sudden teleport (player moved >= 2 tiles in 1 tick) ──
+        // The Sire can teleport the player to any tile within 1 tile of itself.
+        // Rather than checking for one hardcoded landing tile, we detect any
+        // sudden large position change during P3 as an explosion teleport.
+        // The walk command here is the most reliable because it runs on the client
+        // thread at the exact tick the teleport resolves.
+        if (lastPlayerLocation != null
+                && currentPos.distanceTo(lastPlayerLocation) >= 2
+                && !explosionHappened) {
+            // Additional sanity: the teleport moves the player NORTH (toward the Sire),
+            // so the new Y should be >= the old Y (higher Y = more north in this arena).
+            // This avoids false positives from our own dodge walk moving south.
+            if (currentPos.getY() >= lastPlayerLocation.getY() || !explosionIncoming) {
+                log("TICK-PERFECT: Player teleported! " + lastPlayerLocation + " → " + currentPos + " (dist=" + currentPos.distanceTo(lastPlayerLocation) + ")");
+                dodgeLandingTile = currentPos;
+                explosionIncoming = true;
+                explosionHappened = true;
+                postExplosionMiasmaCount = 0;
+                p3AttackCount = 0;
+                explosionImminent = false;
 
-            // Fire the dodge walk IMMEDIATELY — this is on the client thread,
-            // so it processes on this exact tick with zero delay.
-            Rs2Player.toggleRunEnergy(true);
-            fireExplosionDodgeWalk();
+                // Compute dodge target from the actual landing position
+                explosionDodgeTarget = computeExplosionDodgeTarget(currentPos);
+                log("Computed dodge target: " + explosionDodgeTarget);
+
+                // Fire the dodge walk IMMEDIATELY — this is on the client thread,
+                // so it processes on this exact tick with zero delay.
+                enableRunNonBlocking();
+                fireExplosionDodgeWalk();
+            }
         }
 
         lastPlayerLocation = currentPos;
@@ -608,36 +731,56 @@ public class SireScript extends Script {
         }
 
         // ── 1. CRITICAL: Phase 3 explosion dodge ──
-        // Wiki: Player is teleported to western tile of Row 2 (2969, 4772).
-        // Two ticks later explosion fires dealing up to 96 damage.
-        // Dodge target is ALWAYS ROW3_LEFT (2969, 4770) — 2 tiles straight south.
+        // The Sire teleports the player to any tile within 1 tile of itself.
+        // Two ticks later the explosion fires dealing up to 96 damage.
+        // Dodge target is dynamically computed — nearest Row 3 tile south.
         // "As soon as the teleport occurs, spam-click on Row 3 to avoid the attack."
         if (explosionIncoming) {
-            status = "Dodging explosion — spam-clicking Row 3!";
+            // Recompute target from current position
+            explosionDodgeTarget = computeExplosionDodgeTarget(player.getWorldLocation());
+            status = "Dodging explosion — spam-clicking " + explosionDodgeTarget + "!";
             state = SireState.DODGING_EXPLOSION;
-            log("Explosion dodge (main loop): player at " + player.getWorldLocation() + " → target " + EXPLOSION_DODGE_TARGET);
+            log("Explosion dodge (main loop): player at " + player.getWorldLocation() + " → target " + explosionDodgeTarget);
 
             // Ensure run is on so the 2-tile move completes in 1 game tick
-            Rs2Player.toggleRunEnergy(true);
+            enableRunNonBlocking();
 
             // Aggressive spam — fire walk commands with tight sleep gaps between
-            for (int i = 0; i < 5; i++) {
+            int spamClicks = config.dodgeImmediateSpamClicks();
+            int spamDelay = config.dodgeImmediateSpamDelayMs();
+            for (int i = 0; i < spamClicks; i++) {
                 fireExplosionDodgeWalk();
-                sleep(50);
+                if (spamDelay > 0) sleep(spamDelay);
             }
 
-            // Keep spam-clicking until we arrive or timeout (2 ticks = 1200ms, use 1800 for safety)
+            // Keep spam-clicking until we arrive or timeout
+            int dodgeTimeout = config.dodgeTimeoutMs();
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
-                if (p.getWorldLocation().distanceTo(EXPLOSION_DODGE_TARGET) <= 1) {
+                // Recompute target each check in case position changed
+                explosionDodgeTarget = computeExplosionDodgeTarget(p.getWorldLocation());
+                if (p.getWorldLocation().distanceTo(explosionDodgeTarget) <= 1) {
                     return true;
                 }
                 fireExplosionDodgeWalk();
                 return false;
-            }, 1800);
+            }, dodgeTimeout);
+
+            // Record dodge completion diagnostics
+            dodgeEndTimeMs = System.currentTimeMillis();
+            Player pFinal = Microbot.getClient().getLocalPlayer();
+            if (pFinal != null) {
+                dodgePlayerFinalTile = pFinal.getWorldLocation();
+                lastDodgeSucceeded = dodgePlayerFinalTile.distanceTo(explosionDodgeTarget) <= 1;
+            }
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
+            log("Dodge complete (main loop): succeeded=" + lastDodgeSucceeded
+                    + " clicks=" + dodgeClicksFired + " (canvas=" + dodgeCanvasClicks
+                    + " minimap=" + dodgeMinimapClicks + " fallback=" + dodgeFallbackClicks + ")"
+                    + " time=" + (dodgeEndTimeMs - dodgeStartTimeMs) + "ms"
+                    + " landing=" + dodgeLandingTile + " final=" + dodgePlayerFinalTile);
             return;
         }
 
@@ -660,18 +803,30 @@ public class SireScript extends Script {
 
         // ── 2b. Check if standing on a tracked miasma pool ──
         if (miasmaPools.contains(player.getWorldLocation())) {
-            status = "Moving off miasma pool!";
-            state = SireState.DODGING_MIASMA;
-            dodgeMiasmaPhaseAware(player);
-            // In Phase 3, re-attack immediately after dodge
-            if (currentPhase == 3) {
-                Rs2NpcModel sireNow = findSire();
-                if (sireNow != null) {
-                    Rs2Npc.interact(sireNow, "attack");
-                    tickSleep();
+            miasmaDodgeAttempts++;
+            if (miasmaDodgeAttempts > MAX_MIASMA_DODGE_ATTEMPTS) {
+                // Stuck: we've tried to dodge too many times without moving off.
+                // Clear stale pool data so the loop can continue.
+                log("Miasma dodge stuck (" + miasmaDodgeAttempts + " attempts) — clearing stale pools");
+                miasmaPools.clear();
+                miasmaDodgeAttempts = 0;
+            } else {
+                status = "Moving off miasma pool!";
+                state = SireState.DODGING_MIASMA;
+                dodgeMiasmaPhaseAware(player);
+                // In Phase 3, re-attack immediately after dodge
+                if (currentPhase == 3) {
+                    Rs2NpcModel sireNow = findSire();
+                    if (sireNow != null) {
+                        Rs2Npc.interact(sireNow, "attack");
+                        tickSleep();
+                    }
                 }
             }
             return;
+        } else {
+            // Successfully moved off miasma (or was never on it) — reset counter
+            miasmaDodgeAttempts = 0;
         }
 
         // ── 2c. Periodically clean stale miasma pools ──
@@ -783,7 +938,19 @@ public class SireScript extends Script {
 
             // Cast Shadow Barrage on the Sire
             Rs2Magic.castOn(MagicAction.SHADOW_BARRAGE, sire);
-            if (tickSleep()) return;
+
+            // Equip Scorching bow DURING the stun wait — overlaps equip with stun delay
+            // (Sleeping sire has a 10-tick delay; use that time productively)
+            String bowEarly = config.scorchingBow();
+            if (!bowEarly.isEmpty() && !Rs2Equipment.isWearing(bowEarly)) {
+                Rs2Inventory.wield(bowEarly);
+            }
+
+            // Sleeping sire: no miasma/explosion possible, skip tickSleep to save 600ms
+            // Awake sire: check for dodge events
+            if (!targetIsSleeping) {
+                if (tickSleep()) return;
+            }
 
             // Wait for stun to register (NPC ID changes to STUNNED)
             // If casting on sleeping Sire, allow extra time for 10-tick delay
@@ -806,6 +973,7 @@ public class SireScript extends Script {
         }
 
         // ── Equip Scorching bow (only if not already equipped) ──
+        // May already be equipped from the stun wait overlap above
         String bow = config.scorchingBow();
         if (!bow.isEmpty() && !Rs2Equipment.isWearing(bow)) {
             status = "Equipping " + bow;
@@ -945,9 +1113,12 @@ public class SireScript extends Script {
      * Attack all alive vents in a tight inner loop without returning to the main loop.
      * Each vent is 1-shot by the Scorching bow, so: click → hitsplat → next.
      * Breaks out if stun is expiring, dodge is needed, or all vents are dead.
-     * Uses configurable timeout and poll interval from the Tuning config section.
+     * Uses nearest-neighbor ordering to minimize travel time between vents.
      */
     private void attackAllVentsInnerLoop() {
+        // Ensure run is on — maximise travel speed between vents
+        enableRunNonBlocking();
+
         int ventNum = ventsDestroyed;
         for (int i = 0; i < 4; i++) {
             // Safety: bail if stun expiring or dodge needed
@@ -958,12 +1129,14 @@ public class SireScript extends Script {
             if (explosionIncoming || miasmaIncoming) break;
 
             // Re-scan alive lungs each iteration
+            Player p = Microbot.getClient().getLocalPlayer();
             List<Rs2NpcModel> alive = Rs2Npc.getNpcs(LUNG)
                     .filter(l -> !l.isDead())
                     .collect(Collectors.toList());
             if (alive.isEmpty()) break;
 
-            Rs2NpcModel target = pickNextLungInOrder(alive);
+            // Nearest-neighbor: pick the closest alive vent to minimise walk time
+            Rs2NpcModel target = pickNearestLung(p, alive);
             if (target == null) target = alive.get(0);
 
             ventNum++;
@@ -982,17 +1155,17 @@ public class SireScript extends Script {
                 return ventHitLanded || ventsDestroyed > ventsBefore;
             }, () -> {
                 // Re-attack if player becomes truly idle
-                Player p = Microbot.getClient().getLocalPlayer();
-                if (p == null) return;
-                boolean isMoving = p.getPoseAnimation() != p.getIdlePoseAnimation();
-                if (!p.isInteracting() && !isMoving && p.getAnimation() == -1) {
+                Player lp = Microbot.getClient().getLocalPlayer();
+                if (lp == null) return;
+                boolean isMoving = lp.getPoseAnimation() != lp.getIdlePoseAnimation();
+                if (!lp.isInteracting() && !isMoving && lp.getAnimation() == -1) {
                     List<Rs2NpcModel> stillAlive = Rs2Npc.getNpcs(LUNG)
                             .filter(l -> !l.isDead())
                             .collect(Collectors.toList());
                     if (!stillAlive.isEmpty()) {
                         Rs2NpcModel closest = stillAlive.stream()
                                 .min(Comparator.comparingInt(l ->
-                                        p.getWorldLocation().distanceTo(l.getWorldLocation())))
+                                        lp.getWorldLocation().distanceTo(l.getWorldLocation())))
                                 .orElse(null);
                         if (closest != null) {
                             ventHitLanded = false;
@@ -1013,7 +1186,11 @@ public class SireScript extends Script {
      * Fallback mode when ventInnerLoop is disabled.
      */
     private void attackSingleVent(List<Rs2NpcModel> aliveLungs) {
-        Rs2NpcModel picked = pickNextLungInOrder(aliveLungs);
+        // Ensure run is on for travel between vents
+        enableRunNonBlocking();
+
+        Player player = Microbot.getClient().getLocalPlayer();
+        Rs2NpcModel picked = pickNearestLung(player, aliveLungs);
         final Rs2NpcModel targetLung = picked != null ? picked : aliveLungs.get(0);
 
         status = "Destroying vent " + (ventsDestroyed + 1) + "/4";
@@ -1097,10 +1274,19 @@ public class SireScript extends Script {
         // Wiki: "Watch for miasma pools underneath the player; when they appear
         // run to the other marked tile on Row 1"
         if (miasmaPools.contains(player.getWorldLocation())) {
-            status = "Phase 2 — dodging miasma!";
-            state = SireState.DODGING_MIASMA;
-            dodgeMiasmaPhaseAware(player);
+            miasmaDodgeAttempts++;
+            if (miasmaDodgeAttempts > MAX_MIASMA_DODGE_ATTEMPTS) {
+                log("P2 miasma dodge stuck (" + miasmaDodgeAttempts + " attempts) — clearing stale pools");
+                miasmaPools.clear();
+                miasmaDodgeAttempts = 0;
+            } else {
+                status = "Phase 2 — dodging miasma!";
+                state = SireState.DODGING_MIASMA;
+                dodgeMiasmaPhaseAware(player);
+            }
             return;
+        } else {
+            miasmaDodgeAttempts = 0;
         }
 
         // ── Position management ──
@@ -1178,30 +1364,48 @@ public class SireScript extends Script {
         }
 
         // ── CRITICAL: Explosion dodge (backup check inside handlePhase3) ──
-        // Same logic as main loop: spam-click ROW3_LEFT.
+        // Same logic as main loop: spam-click nearest Row 3 tile.
         if (explosionIncoming) {
-            status = "Phase 3 — dodging explosion to Row 3!";
+            explosionDodgeTarget = computeExplosionDodgeTarget(player.getWorldLocation());
+            status = "Phase 3 — dodging explosion to " + explosionDodgeTarget + "!";
             state = SireState.DODGING_EXPLOSION;
-            log("P3 handlePhase3 explosion dodge: player at " + player.getWorldLocation() + " → " + EXPLOSION_DODGE_TARGET);
+            log("P3 handlePhase3 explosion dodge: player at " + player.getWorldLocation() + " → " + explosionDodgeTarget);
 
-            Rs2Player.toggleRunEnergy(true);
+            enableRunNonBlocking();
 
-            for (int i = 0; i < 5; i++) {
+            int spamClicksP3 = config.dodgeImmediateSpamClicks();
+            int spamDelayP3 = config.dodgeImmediateSpamDelayMs();
+            for (int i = 0; i < spamClicksP3; i++) {
                 fireExplosionDodgeWalk();
-                sleep(50);
+                if (spamDelayP3 > 0) sleep(spamDelayP3);
             }
 
+            int dodgeTimeoutP3 = config.dodgeTimeoutMs();
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p == null) return false;
-                if (p.getWorldLocation().distanceTo(EXPLOSION_DODGE_TARGET) <= 1) {
+                explosionDodgeTarget = computeExplosionDodgeTarget(p.getWorldLocation());
+                if (p.getWorldLocation().distanceTo(explosionDodgeTarget) <= 1) {
                     return true;
                 }
                 fireExplosionDodgeWalk();
                 return false;
-            }, 1800);
+            }, dodgeTimeoutP3);
+
+            // Record dodge completion diagnostics
+            dodgeEndTimeMs = System.currentTimeMillis();
+            Player pFinalP3 = Microbot.getClient().getLocalPlayer();
+            if (pFinalP3 != null) {
+                dodgePlayerFinalTile = pFinalP3.getWorldLocation();
+                lastDodgeSucceeded = dodgePlayerFinalTile.distanceTo(explosionDodgeTarget) <= 1;
+            }
             explosionDodgeTick = Microbot.getClient().getTickCount();
             explosionIncoming = false;
+            log("Dodge complete (handlePhase3): succeeded=" + lastDodgeSucceeded
+                    + " clicks=" + dodgeClicksFired + " (canvas=" + dodgeCanvasClicks
+                    + " minimap=" + dodgeMinimapClicks + " fallback=" + dodgeFallbackClicks + ")"
+                    + " time=" + (dodgeEndTimeMs - dodgeStartTimeMs) + "ms"
+                    + " landing=" + dodgeLandingTile + " final=" + dodgePlayerFinalTile);
             return;
         }
 
@@ -1209,15 +1413,24 @@ public class SireScript extends Script {
         // Wiki: "run back and forth on Row 2 while attacking"
         // After dodging, immediately re-engage the Sire before returning.
         if (miasmaPools.contains(player.getWorldLocation())) {
-            status = "Phase 3 — dodging miasma!";
-            state = SireState.DODGING_MIASMA;
-            dodgeMiasmaPhaseAware(player);
-            // Re-attack immediately after dodge — don't waste a full loop cycle
-            if (!Rs2Combat.inCombat() || !player.isInteracting()) {
-                Rs2Npc.interact(sire, "attack");
-                tickSleep();
+            miasmaDodgeAttempts++;
+            if (miasmaDodgeAttempts > MAX_MIASMA_DODGE_ATTEMPTS) {
+                log("P3 miasma dodge stuck (" + miasmaDodgeAttempts + " attempts) — clearing stale pools");
+                miasmaPools.clear();
+                miasmaDodgeAttempts = 0;
+            } else {
+                status = "Phase 3 — dodging miasma!";
+                state = SireState.DODGING_MIASMA;
+                dodgeMiasmaPhaseAware(player);
+                // Re-attack immediately after dodge — don't waste a full loop cycle
+                if (!Rs2Combat.inCombat() || !player.isInteracting()) {
+                    Rs2Npc.interact(sire, "attack");
+                    tickSleep();
+                }
             }
             return;
+        } else {
+            miasmaDodgeAttempts = 0;
         }
 
         // ── P3 Position Clamping: stay within safe Row 2/Row 3 boundaries ──
@@ -1589,25 +1802,23 @@ public class SireScript extends Script {
 
         if (currentPhase == 2 && !sirePanicking) {
             // Phase 2 normal: swap between Row 1 left/right
-            WorldPoint current = closestOf(player, ROW1_LEFT, ROW1_RIGHT);
-            WorldPoint other = current.equals(ROW1_LEFT) ? ROW1_RIGHT : ROW1_LEFT;
-            if (!miasmaPools.contains(other)) {
-                walkToSafe(other);
+            WorldPoint best = pickBestWalkableTile(
+                    new WorldPoint[] { ROW1_LEFT, ROW1_RIGHT, ROW2_LEFT, ROW2_RIGHT }, loc);
+            if (best != null) {
+                walkToSafe(best);
             } else {
-                // Both Row 1 tiles contaminated — try Row 2
-                WorldPoint r2 = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
-                walkToSafe(r2);
+                dodgeMiasma(player);
+                return;
             }
             } else if (currentPhase == 2 && sirePanicking) {
             // Phase 2 panicking: swap between Row 2 left/right
-            WorldPoint current = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
-            WorldPoint other = current.equals(ROW2_LEFT) ? ROW2_RIGHT : ROW2_LEFT;
-            if (!miasmaPools.contains(other)) {
-                walkToSafe(other);
+            WorldPoint best = pickBestWalkableTile(
+                    new WorldPoint[] { ROW2_LEFT, ROW2_RIGHT, ROW3_LEFT, ROW3_RIGHT }, loc);
+            if (best != null) {
+                walkToSafe(best);
             } else {
-                // Both Row 2 tiles contaminated — go to Row 3 briefly
-                WorldPoint r3 = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
-                walkToSafe(r3);
+                dodgeMiasma(player);
+                return;
             }
         } else if (currentPhase == 3) {
             // Phase 3: "run back and forth on Row 2 while attacking"
@@ -1615,35 +1826,23 @@ public class SireScript extends Script {
             long ticksSinceExplosion = Microbot.getClient().getTickCount() - explosionDodgeTick;
             boolean inExplosionWindow = ticksSinceExplosion <= EXPLOSION_SAFETY_WINDOW_TICKS;
 
+            WorldPoint[] preferred;
             if (inExplosionWindow) {
-                // Stay on / dodge to Row 3 during explosion safety window
-                WorldPoint current = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
-                WorldPoint other = current.equals(ROW3_LEFT) ? ROW3_RIGHT : ROW3_LEFT;
-                if (!miasmaPools.contains(other)) {
-                    walkToSafe(other);
-                } else if (!miasmaPools.contains(current) && player.getWorldLocation().distanceTo(current) > 1) {
-                    walkToSafe(current);
-                } else {
-                // Row 3 fully contaminated — swap to other Row 3 tile or stay put
-                WorldPoint otherR3 = current.equals(ROW3_LEFT) ? ROW3_RIGHT : ROW3_LEFT;
-                walkToSafe(otherR3);
-            }
+                // Prioritise Row 3 during explosion safety window
+                preferred = new WorldPoint[] { ROW3_LEFT, ROW3_RIGHT, ROW2_LEFT, ROW2_RIGHT };
             } else {
-                // Normal P3: dodge between Row 2 left/right
-                WorldPoint current = closestOf(player, ROW2_LEFT, ROW2_RIGHT);
-                WorldPoint other = current.equals(ROW2_LEFT) ? ROW2_RIGHT : ROW2_LEFT;
-                if (!miasmaPools.contains(other)) {
-                    walkToSafe(other);
-                } else if (!miasmaPools.contains(current) && player.getWorldLocation().distanceTo(current) > 1) {
-                    walkToSafe(current);
-                } else {
-                    // Both Row 2 tiles contaminated — go to Row 3 briefly
-                    WorldPoint r3 = closestOf(player, ROW3_LEFT, ROW3_RIGHT);
-                    walkToSafe(r3);
-                }
+                // Normal P3: Row 2 preferred, Row 3 fallback
+                preferred = new WorldPoint[] { ROW2_LEFT, ROW2_RIGHT, ROW3_LEFT, ROW3_RIGHT };
+            }
+            WorldPoint best = pickBestWalkableTile(preferred, loc);
+            if (best != null) {
+                walkToSafe(best);
+            } else {
+                dodgeMiasma(player);
+                return;
             }
         } else {
-            // Fallback: use generic dodge
+            // Fallback: use generic dodge (covers phase 0/1 or unknown)
             dodgeMiasma(player);
             return;
         }
@@ -1651,8 +1850,10 @@ public class SireScript extends Script {
     }
 
     /**
-     * Generic dodge — move to the nearest safe tile.
+     * Generic dodge — move to the nearest safe, walkable tile.
      * In Phase 3, ONLY use Row 2/Row 3 tiles to avoid tentacle damage.
+     * For other phases, uses known-safe tiles first, then falls back to
+     * dynamically-discovered walkable tiles around the player.
      * Miasma is 3x3: center does 10-30/tick, outer does 2-8/tick.
      */
     private void dodgeMiasma(Player player) {
@@ -1665,19 +1866,25 @@ public class SireScript extends Script {
                     ROW2_LEFT, ROW2_RIGHT, ROW3_LEFT, ROW3_RIGHT
             };
         } else {
-            // Other phases: prefer safe row tiles, plus nearby offsets as fallback
+            // Other phases: use known-safe tiles only (no arbitrary offsets)
             candidates = new WorldPoint[] {
-                    closestOf(player, ROW1_LEFT, ROW1_RIGHT),
-                    closestOf(player, ROW2_LEFT, ROW2_RIGHT),
-                    STUN_TILE,
-                    new WorldPoint(loc.getX() + 3, loc.getY(), loc.getPlane()),
-                    new WorldPoint(loc.getX() - 3, loc.getY(), loc.getPlane()),
-                    new WorldPoint(loc.getX(), loc.getY() + 3, loc.getPlane()),
-                    new WorldPoint(loc.getX(), loc.getY() - 3, loc.getPlane()),
+                    ROW1_LEFT, ROW1_RIGHT,
+                    ROW2_LEFT, ROW2_RIGHT,
+                    ROW3_LEFT, ROW3_RIGHT,
+                    STUN_TILE
             };
         }
 
-        WorldPoint best = pickBestTile(candidates);
+        // Filter to only walkable, non-miasma tiles; fall back to walkable tiles around player
+        WorldPoint best = pickBestWalkableTile(candidates, loc);
+        if (best == null) {
+            // All known tiles are blocked or on miasma — find ANY walkable tile nearby
+            best = findNearestWalkable(loc, 5);
+            if (best == null) {
+                log("dodgeMiasma: no walkable tile found at all! Walking south as last resort.");
+                best = new WorldPoint(loc.getX(), loc.getY() - 2, loc.getPlane());
+            }
+        }
         walkToSafe(best);
         sleep(600);
     }
@@ -1946,13 +2153,39 @@ public class SireScript extends Script {
     }
 
     /**
-     * No longer needed — explosion dodge now uses the hardcoded EXPLOSION_DODGE_TARGET
-     * (ROW3_LEFT) since the wiki confirms the player always lands on western Row 2.
-     * Kept as a fallback utility in case any other code references it.
+     * Compute the best explosion dodge destination from the player's current/post-teleport
+     * position. The Sire can teleport the player to any tile within 1 tile of itself,
+     * so the best safe tile varies.
+     * <p>
+     * Strategy: pick the closest Row 3 tile that isn't covered by miasma.
+     * If both Row 3 tiles have miasma, fall back to the one farthest from pools.
+     * The player needs to move south (decreasing Y) to escape the explosion radius.
      */
-    @SuppressWarnings("unused")
-    private WorldPoint dodgeSouthTarget(WorldPoint current) {
-        return EXPLOSION_DODGE_TARGET;
+    private WorldPoint computeExplosionDodgeTarget(WorldPoint playerPos) {
+        if (playerPos == null) return ROW3_LEFT;
+
+        // Pick the closest Row 3 tile based on the player's X position
+        WorldPoint primary = closestOf(null, ROW3_LEFT, ROW3_RIGHT);
+        WorldPoint secondary = primary.equals(ROW3_LEFT) ? ROW3_RIGHT : ROW3_LEFT;
+
+        // Use actual player X to decide — if closer to right side, go right
+        if (playerPos.getX() >= (ROW3_LEFT.getX() + ROW3_RIGHT.getX()) / 2 + 1) {
+            primary = ROW3_RIGHT;
+            secondary = ROW3_LEFT;
+        } else {
+            primary = ROW3_LEFT;
+            secondary = ROW3_RIGHT;
+        }
+
+        // Prefer a tile not covered by miasma
+        if (!miasmaPools.contains(primary)) {
+            return primary;
+        }
+        if (!miasmaPools.contains(secondary)) {
+            return secondary;
+        }
+        // Both covered — pick the one closest to player (minimize travel time)
+        return playerPos.distanceTo(primary) <= playerPos.distanceTo(secondary) ? primary : secondary;
     }
 
     /**
@@ -2006,6 +2239,19 @@ public class SireScript extends Script {
     }
 
     /**
+     * Pick the alive lung nearest to the player's current position.
+     * Uses nearest-neighbor heuristic to minimise travel time between vents.
+     * With only 4 vents, nearest-neighbor is optimal or near-optimal for total path length.
+     */
+    private Rs2NpcModel pickNearestLung(Player player, List<Rs2NpcModel> aliveLungs) {
+        if (aliveLungs.isEmpty()) return null;
+        if (player == null) return aliveLungs.get(0);
+        WorldPoint playerLoc = player.getWorldLocation();
+        return aliveLungs.stream()
+                .min(Comparator.comparingInt(l -> playerLoc.distanceTo(l.getWorldLocation())))
+                .orElse(aliveLungs.get(0));
+    }
+    /**
      * Pick the closest tile from an array of candidates.
      */
     private WorldPoint closestOf(Player player, WorldPoint[] candidates) {
@@ -2026,10 +2272,23 @@ public class SireScript extends Script {
     // ── Movement Helpers ─────────────────────────────────
 
     /**
-     * Walk to a target WorldPoint with null-safety on LocalPoint conversion.
-     * Falls back to Rs2Walker.walkTo() if the tile is not in the current scene.
+     * Walk to a target WorldPoint with null-safety and walkability validation.
+     * Falls back to the nearest walkable tile if the target itself is blocked,
+     * and uses Rs2Walker.walkTo() if the tile is not in the current scene.
      */
     private void walkToSafe(WorldPoint target) {
+        // If the target tile isn't walkable, find the nearest walkable tile instead
+        if (!Rs2Tile.isWalkable(target)) {
+            WorldPoint walkable = findNearestWalkable(target, 3);
+            if (walkable != null) {
+                log("walkToSafe: target " + target + " not walkable, rerouting to " + walkable);
+                target = walkable;
+            } else {
+                log("walkToSafe: no walkable tile near " + target + " — using walkTo pathfinder");
+                Rs2Walker.walkTo(target);
+                return;
+            }
+        }
         LocalPoint local = LocalPoint.fromWorld(Microbot.getClient(), target);
         if (local != null) {
             Rs2Walker.walkFastLocal(local);
@@ -2037,6 +2296,23 @@ public class SireScript extends Script {
             log("walkToSafe: LocalPoint null for " + target + " — using walkTo fallback");
             Rs2Walker.walkTo(target);
         }
+    }
+
+    /**
+     * Find the nearest walkable tile within the given radius of a target.
+     * Prefers tiles not on miasma pools. Returns null if none found.
+     */
+    private WorldPoint findNearestWalkable(WorldPoint center, int radius) {
+        List<WorldPoint> walkable = Rs2Tile.getWalkableTilesAroundTile(center, radius);
+        if (walkable.isEmpty()) return null;
+        // Prefer tiles not on miasma
+        WorldPoint best = walkable.stream()
+                .filter(wp -> !miasmaPools.contains(wp))
+                .min(Comparator.comparingInt(center::distanceTo))
+                .orElse(null);
+        return best != null ? best : walkable.stream()
+                .min(Comparator.comparingInt(center::distanceTo))
+                .orElse(null);
     }
 
     /**
@@ -2064,6 +2340,27 @@ public class SireScript extends Script {
                 .orElse(candidates[0]);
     }
 
+    /**
+     * Pick the best walkable, non-miasma tile from candidates.
+     * Returns null if no candidate is both walkable and miasma-free.
+     * Falls back to any walkable tile (even on miasma) before returning null.
+     */
+    private WorldPoint pickBestWalkableTile(WorldPoint[] candidates, WorldPoint playerPos) {
+        // First pass: walkable AND miasma-free, closest to player
+        WorldPoint best = Arrays.stream(candidates)
+                .filter(wp -> !miasmaPools.contains(wp) && Rs2Tile.isWalkable(wp))
+                .min(Comparator.comparingInt(playerPos::distanceTo))
+                .orElse(null);
+        if (best != null) return best;
+
+        // Second pass: walkable but possibly on miasma (move off current pool at least)
+        best = Arrays.stream(candidates)
+                .filter(wp -> Rs2Tile.isWalkable(wp) && !wp.equals(playerPos))
+                .min(Comparator.comparingInt(playerPos::distanceTo))
+                .orElse(null);
+        return best;
+    }
+
     // ── State Reset ──────────────────────────────────────
 
     private void resetFightState() {
@@ -2076,7 +2373,9 @@ public class SireScript extends Script {
         miasmaIncoming = false;
         miasmaPools.clear();
         lastMiasmaCleanTick = 0;
+        miasmaDodgeAttempts = 0;
         explosionIncoming = false;
+        explosionDodgeTarget = ROW3_LEFT;
         explosionHappened = false;
         postExplosionMiasmaCount = 0;
         p3AttackCount = 0;
