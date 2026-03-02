@@ -332,6 +332,26 @@ public class TormentedDemonScript extends Script {
         Rs2Player.eatAt(config.minEatPercent());
         Rs2Player.drinkPrayerPotionAt(config.minPrayerPercent());
 
+        // ── Loot smouldering drops for emergency healing/prayer ──
+        lootSmoulderingDropsIfNeeded(config);
+
+        // ── Emergency teleport check (highest priority) ──
+        if (config.enableEmergencyTeleport()) {
+            int hpPercent = getHpPercent();
+            boolean hasHealing = hasHealing();
+            if (!hasHealing && hpPercent <= config.emergencyTeleportHp()) {
+                statusText = "CRITICAL HP - Emergency teleporting!";
+                // Try to loot quickly if possible before teleporting
+                if (currentTarget != null && currentTarget.isDead() && !hasLooted) {
+                    attemptLooting(config);
+                    hasLooted = true;
+                    killCount++;
+                }
+                emergencyTeleport(config);
+                return;
+            }
+        }
+
         // ── Retreat check (Full Auto) ──
         if (config.mode() == TormentedDemonConfig.Mode.FULL_AUTO && shouldRetreat(config)) {
             statusText = "Retreating to bank...";
@@ -454,26 +474,16 @@ public class TormentedDemonScript extends Script {
 
         // ── Thralls ──
         if (config.useThralls()) {
-            if (Rs2Thrall.isActive()) {
-                // Thrall is active or on cooldown — nothing to do
-            } else {
+            // Check if thrall is on cooldown (don't wait for it to expire, just check cooldown)
+            int thrallCooldown = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_COOLDOWN);
+            if (thrallCooldown == 0) {
                 Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
-                if (bestThrall != null) {
-                    logOnce("Attempting to summon thrall: " + bestThrall.getName());
+                if (bestThrall != null && Rs2Thrall.canCast(bestThrall)) {
+                    statusText = "Summoning thrall...";
                     if (Rs2Thrall.cast(bestThrall)) {
                         logOnce("Summoned thrall: " + bestThrall.getName());
                         sleep(600, 800);
-                    } else {
-                        logOnce("Thrall cast failed for " + bestThrall.getName() + " — spell may have been interrupted");
                     }
-                } else {
-                    // Debug: log why no thrall is available
-                    boolean hasBookOfDead = Rs2Inventory.hasItem(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD)
-                            || Rs2Equipment.isWearing(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD);
-                    boolean onArceuus = Rs2Magic.isSpellbook(net.runelite.client.plugins.microbot.util.magic.Rs2Spellbook.ARCEUUS);
-                    logOnce("No castable thrall found — BookOfDead=" + hasBookOfDead
-                            + ", Arceuus=" + onArceuus
-                            + ", Type=" + config.thrallType());
                 }
             }
         }
@@ -747,6 +757,39 @@ public class TormentedDemonScript extends Script {
 
     // ─── Looting ────────────────────────────────────────────────────────────────
 
+    /**
+     * Opportunistically loot smouldering drops during combat for emergency healing/prayer.
+     * These drops appear on the ground while fighting and provide instant restoration:
+     * - Smouldering pile of flesh: heals 10 HP
+     * - Smouldering gland: restores 10 prayer points
+     */
+    private void lootSmoulderingDropsIfNeeded(TormentedDemonConfig config) {
+        int hpPercent = getHpPercent();
+        int prayer = Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER);
+        int maxPrayer = Microbot.getClient().getRealSkillLevel(Skill.PRAYER);
+        int prayerPercent = maxPrayer > 0 ? (prayer * 100) / maxPrayer : 100;
+
+        // Loot smouldering flesh if HP is low
+        if (config.lootSmoulderingFlesh() && hpPercent <= config.smoulderingFleshHpThreshold()) {
+            if (Rs2GroundItem.exists("Smouldering pile of flesh", 10)) {
+                statusText = "Emergency loot: flesh for healing";
+                if (Rs2GroundItem.loot("Smouldering pile of flesh", 10)) {
+                    sleep(300, 600);
+                }
+            }
+        }
+
+        // Loot smouldering gland if prayer is low
+        if (config.lootSmoulderingGland() && prayerPercent <= config.smoulderingGlandPrayerThreshold()) {
+            if (Rs2GroundItem.exists("Smouldering gland", 10)) {
+                statusText = "Emergency loot: gland for prayer";
+                if (Rs2GroundItem.loot("Smouldering gland", 10)) {
+                    sleep(300, 600);
+                }
+            }
+        }
+    }
+
     private void attemptLooting(TormentedDemonConfig config) {
         statusText = "Looting...";
 
@@ -1019,6 +1062,50 @@ public class TormentedDemonScript extends Script {
             Microbot.log(message);
             lastLogMessage = message;
         }
+    }
+
+    // ─── Emergency Teleport ─────────────────────────────────────────────────────
+
+    private void emergencyTeleport(TormentedDemonConfig config) {
+        statusText = "EMERGENCY TELEPORT!";
+        disableAllPrayers();
+        currentTarget = null;
+
+        String teleItem = config.teleportItem();
+        if (!teleItem.isEmpty() && Rs2Inventory.hasItem(teleItem)) {
+            // Try common teleport actions in order
+            if (!Rs2Inventory.interact(teleItem, "break")) {
+                if (!Rs2Inventory.interact(teleItem, "rub")) {
+                    if (!Rs2Inventory.interact(teleItem, "teleport")) {
+                        Rs2Inventory.interact(teleItem);
+                    }
+                }
+            }
+            Rs2Player.waitForAnimation();
+            sleepUntil(() -> !Microbot.getClient().isInInstancedRegion(), 5000);
+            // After teleport, stop the script or return to banking
+            if (config.mode() == TormentedDemonConfig.Mode.FULL_AUTO) {
+                botState = BotState.BANKING;
+                bankStep = BankStep.RESTORE;
+            }
+        } else {
+            logOnce("Emergency teleport item not found: " + teleItem);
+        }
+    }
+
+    private int getHpPercent() {
+        int current = Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS);
+        int max = Microbot.getClient().getRealSkillLevel(Skill.HITPOINTS);
+        return max > 0 ? (current * 100) / max : 100;
+    }
+
+    private boolean hasHealing() {
+        // Check if player has food or brews
+        if (!Rs2Inventory.getInventoryFood().isEmpty()) {
+            return true;
+        }
+        // Check for Saradomin brews or other healing potions
+        return Rs2Inventory.contains("Saradomin brew");
     }
 
     @Override
