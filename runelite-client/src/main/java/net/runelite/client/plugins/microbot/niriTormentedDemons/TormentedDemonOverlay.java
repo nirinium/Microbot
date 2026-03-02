@@ -23,7 +23,7 @@ public class TormentedDemonOverlay extends OverlayPanel {
             panelComponent.setPreferredSize(new Dimension(200, 0));
 
             panelComponent.getChildren().add(TitleComponent.builder()
-                    .text("Tormented Demons v" + TormentedDemonPlugin.VERSION)
+                    .text("Niri Tormented Demons v" + TormentedDemonPlugin.VERSION)
                     .color(Color.CYAN)
                     .build());
 

@@ -7,7 +7,7 @@ import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
 
 @ConfigInformation(
-        "<b>Tormented Demon Killer</b><br/><br/>"
+        "<b>Niri Tormented Demon Killer</b><br/><br/>"
                 + "Supports Full Auto (banking, travel, combat) and Combat Only modes.<br/><br/>"
                 + "<b>Setup Instructions:</b><br/>"
                 + "<ol>"
@@ -207,17 +207,6 @@ public interface TormentedDemonConfig extends Config {
     @Range(min = 0, max = 300)
     default int gearSwitchDelay() {
         return 50;
-    }
-
-    @ConfigItem(
-            keyName = "avoidOtherPlayerTargets",
-            name = "Avoid Other Players' Targets",
-            description = "Never attack a demon that another player is already fighting",
-            section = combatSection,
-            position = 6
-    )
-    default boolean avoidOtherPlayerTargets() {
-        return true;
     }
 
     @ConfigItem(

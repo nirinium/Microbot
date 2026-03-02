@@ -39,9 +39,10 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  */
 @PluginDescriptor(
-        name = PluginDescriptor.zerozero + "Tormented Demons",
+        name = PluginDescriptor.NIRI + "Niri Tormented Demons",
+        authors = {"Niri"},
         description = "Automates Tormented Demon kills with gear switching, prayer, dodging, and banking",
-        tags = {"tormented", "demon", "prayer", "switch", "microbot"},
+        tags = {"tormented", "demon", "prayer", "switch", "microbot", "niri", "boss", "combat"},
         version = TormentedDemonPlugin.VERSION,
         enabledByDefault = PluginConstants.DEFAULT_ENABLED,
         isExternal = PluginConstants.IS_EXTERNAL
