@@ -366,11 +366,45 @@ public interface TormentedDemonConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "enableEmergencyTeleport",
+            name = "Enable Emergency Teleport",
+            description = "Use emergency teleport when HP is critical and no food remains",
+            section = suppliesSection,
+            position = 3
+    )
+    default boolean enableEmergencyTeleport() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "emergencyTeleportHp",
+            name = "Emergency Teleport HP %",
+            description = "Teleport out when HP drops below this % and no food/healing remains",
+            section = suppliesSection,
+            position = 4
+    )
+    @Range(min = 5, max = 50)
+    default int emergencyTeleportHp() {
+        return 20;
+    }
+
+    @ConfigItem(
+            keyName = "teleportItem",
+            name = "Emergency Teleport Item",
+            description = "Item name for emergency teleport (e.g. Teleport to house, Varrock teleport, Ring of dueling)",
+            section = suppliesSection,
+            position = 5
+    )
+    default String teleportItem() {
+        return "Teleport to house";
+    }
+
+    @ConfigItem(
             keyName = "combatPotionType",
             name = "Combat Potion",
             description = "Type of melee stat-boosting potion to use",
             section = suppliesSection,
-            position = 3
+            position = 6
     )
     default CombatPotionType combatPotionType() {
         return CombatPotionType.SUPER_COMBAT;
@@ -381,7 +415,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Ranging Potion",
             description = "Type of ranged stat-boosting potion to use",
             section = suppliesSection,
-            position = 4
+            position = 7
     )
     default RangingPotionType rangingPotionType() {
         return RangingPotionType.RANGING;
@@ -392,7 +426,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Re-pot Below % Boost",
             description = "Drink a combat/ranging potion when boosted stats fall below this % of max boost",
             section = suppliesSection,
-            position = 5
+            position = 8
     )
     @Range(min = 1, max = 100)
     default int boostedStatsThreshold() {
@@ -439,6 +473,52 @@ public interface TormentedDemonConfig extends Config {
     )
     default boolean scatterAshes() {
         return false;
+    }
+
+    @ConfigItem(
+            keyName = "lootSmoulderingFlesh",
+            name = "Loot Smouldering Flesh",
+            description = "Automatically loot 'Smouldering pile of flesh' for healing during combat (heals 10 HP)",
+            section = lootingSection,
+            position = 3
+    )
+    default boolean lootSmoulderingFlesh() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "smoulderingFleshHpThreshold",
+            name = "Flesh HP Threshold %",
+            description = "Loot smouldering flesh when HP drops below this percentage",
+            section = lootingSection,
+            position = 4
+    )
+    @Range(min = 20, max = 90)
+    default int smoulderingFleshHpThreshold() {
+        return 60;
+    }
+
+    @ConfigItem(
+            keyName = "lootSmoulderingGland",
+            name = "Loot Smouldering Gland",
+            description = "Automatically loot 'Smouldering gland' for prayer restoration during combat (restores 10 prayer)",
+            section = lootingSection,
+            position = 5
+    )
+    default boolean lootSmoulderingGland() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "smoulderingGlandPrayerThreshold",
+            name = "Gland Prayer Threshold %",
+            description = "Loot smouldering gland when prayer drops below this percentage",
+            section = lootingSection,
+            position = 6
+    )
+    @Range(min = 10, max = 80)
+    default int smoulderingGlandPrayerThreshold() {
+        return 40;
     }
 
     // ─── Enums ──────────────────────────────────────────────────────────────────
