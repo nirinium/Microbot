@@ -288,11 +288,23 @@ public interface TormentedDemonConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "specAttackCooldown",
+            name = "Spec Attack Cooldown (ticks)",
+            description = "Minimum ticks between spec attacks to avoid rapid gear switching (1 tick = 0.6s, recommended: 20-50)",
+            section = combatSection,
+            position = 14
+    )
+    @Range(min = 5, max = 100)
+    default int specAttackCooldown() {
+        return 25;
+    }
+
+    @ConfigItem(
             keyName = "useDharokPunish",
             name = "Dharok Punish",
             description = "Switch to Dharok's greataxe for a hit after your fire weapon breaks the demon's shield",
             section = combatSection,
-            position = 14
+            position = 15
     )
     default boolean useDharokPunish() {
         return false;
@@ -303,7 +315,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Punish Weapon Name",
             description = "Name of the punish weapon to equip when the demon's shield is down",
             section = combatSection,
-            position = 15
+            position = 16
     )
     default String punishWeaponName() {
         return "Dharok's greataxe";
@@ -314,7 +326,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Use Rapid Heal",
             description = "Keep the Rapid Heal prayer active during combat",
             section = combatSection,
-            position = 16
+            position = 17
     )
     default boolean useRapidHeal() {
         return false;
