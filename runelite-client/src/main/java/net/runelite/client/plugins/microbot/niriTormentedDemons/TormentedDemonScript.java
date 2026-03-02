@@ -5,6 +5,7 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.HeadIcon;
+import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
@@ -59,6 +60,15 @@ public class TormentedDemonScript extends Script {
     private static final String TD_NAME = "Tormented Demon";
     private static final int FEROX_POOL_ID = 39651;
     private static final WorldPoint FEROX_AREA = new WorldPoint(3150, 3634, 0);
+
+    /**
+     * Items that are ALWAYS looted regardless of config or mode.
+     */
+    private static final List<String> ALWAYS_LOOT = List.of(
+            "Tormented synapse",
+            "Burning claw",
+            "Guthixian temple teleport"
+    );
 
     // Travel object IDs
     private static final int FIRST_STAIRS_ID = 53623;
@@ -632,13 +642,13 @@ public class TormentedDemonScript extends Script {
     /**
      * Find the best tormented demon to attack:
      * prefer ones already targeting us, then ones not in combat, then closest.
-     * Optionally filters out NPCs that are already being fought by another player.
+     * Always filters out NPCs that are being fought by another player.
      */
     private Rs2NpcModel findBestTarget(TormentedDemonConfig config) {
         Player local = Microbot.getClient().getLocalPlayer();
         if (local == null) return null;
 
-        // First: demons already targeting us
+        // First: demons already targeting us (always valid)
         Rs2NpcModel engaging = Rs2Npc.getAttackableNpcs(TD_NAME)
                 .filter(npc -> npc.getInteracting() == local)
                 .filter(npc -> npc.getHeadIcon() != null)
@@ -648,22 +658,37 @@ public class TormentedDemonScript extends Script {
 
         if (engaging != null) return engaging;
 
-        // Second: idle demons or those not being fought by another player
+        // Second: idle demons not involved with any other player
         return Rs2Npc.getAttackableNpcs(TD_NAME)
-                .filter(npc -> {
-                    Actor interacting = npc.getInteracting();
-                    if (interacting == null) return true;   // Idle — available
-                    if (interacting == local) return true;   // Targeting us — available
-                    // If another player is fighting it, skip it
-                    if (config.avoidOtherPlayerTargets() && interacting instanceof Player) {
-                        return false;
-                    }
-                    return true;
-                })
+                .filter(npc -> !isBeingFoughtByOtherPlayer(npc, local))
                 .filter(npc -> npc.getHeadIcon() != null)
                 .filter(npc -> !getAvailableStyles(config, npc.getHeadIcon()).isEmpty())
                 .findFirst()
                 .orElse(null);
+    }
+
+    /**
+     * Checks both directions to determine if another player is engaged with an NPC:
+     * 1. The NPC is targeting another player (npc → player)
+     * 2. Another player is targeting the NPC (player → npc)
+     */
+    private boolean isBeingFoughtByOtherPlayer(Rs2NpcModel npc, Player local) {
+        // Check direction 1: NPC is interacting with another player
+        Actor npcTarget = npc.getInteracting();
+        if (npcTarget instanceof Player && npcTarget != local) {
+            return true;
+        }
+
+        // Check direction 2: any other player is interacting with this NPC
+        int npcIndex = npc.getIndex();
+        boolean otherPlayerTargeting = Rs2Player.getPlayers(player -> {
+            Actor playerTarget = player.getInteracting();
+            if (playerTarget == null) return false;
+            if (!(playerTarget instanceof NPC)) return false;
+            return ((NPC) playerTarget).getIndex() == npcIndex;
+        }).findAny().isPresent();
+
+        return otherPlayerTargeting;
     }
 
     // ─── Potions ────────────────────────────────────────────────────────────────
@@ -724,7 +749,26 @@ public class TormentedDemonScript extends Script {
 
     private void attemptLooting(TormentedDemonConfig config) {
         statusText = "Looting...";
+
+        // Always loot priority items first, regardless of config
+        if (!Rs2Inventory.isFull()) {
+            LootingParameters priorityParams = new LootingParameters(
+                    10, 1, 1, 0, false, true,
+                    ALWAYS_LOOT.toArray(new String[0])
+            );
+            if (Rs2GroundItem.lootItemsBasedOnNames(priorityParams)) {
+                sleep(600, 1000);
+            }
+        }
+
+        // Then loot user-configured items
         List<String> names = parseLootNames(config.lootItems());
+        // Merge in always-loot items (avoid duplicates)
+        for (String alwaysItem : ALWAYS_LOOT) {
+            if (names.stream().noneMatch(n -> n.equalsIgnoreCase(alwaysItem))) {
+                names.add(alwaysItem);
+            }
+        }
 
         if (!names.isEmpty()) {
             LootingParameters params = new LootingParameters(
