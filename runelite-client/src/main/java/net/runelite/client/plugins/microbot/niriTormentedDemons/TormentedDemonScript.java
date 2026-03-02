@@ -26,6 +26,7 @@ import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Spells;
 import net.runelite.client.plugins.microbot.util.magic.thralls.Rs2Thrall;
+import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
 import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
 import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
@@ -446,29 +447,53 @@ public class TormentedDemonScript extends Script {
             int thrallActive = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_ACTIVE);
             int thrallCooldown = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_COOLDOWN);
             
-            Microbot.log("Thrall check - Active: " + thrallActive + ", Cooldown: " + thrallCooldown + ", Config enabled: " + config.useThralls());
+            Microbot.log("=== THRALL CHECK ===");
+            Microbot.log("Active varbit: " + thrallActive + ", Cooldown varbit: " + thrallCooldown);
+            Microbot.log("Config thrall type: " + config.thrallType());
             
             if (thrallActive == 0 && thrallCooldown == 0) {
-                Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
-                Microbot.log("Best thrall found: " + (bestThrall != null ? bestThrall.getName() : "null") + ", Type: " + config.thrallType());
+                // Get best thrall by type WITHOUT the canCast filter (which has the isActive bug)
+                ThrallType wantedType = config.thrallType();
+                Rs2Thrall bestThrall = Arrays.stream(Rs2Thrall.values())
+                    .filter(t -> t.getThrallType() == wantedType)
+                    .findFirst()  // Will get GREATER first since it's listed last in enum
+                    .orElse(null);
+                    
+                Microbot.log("Best thrall for " + wantedType + ": " + (bestThrall != null ? bestThrall.getName() : "null"));
                 
                 if (bestThrall != null) {
-                    boolean hasRequirements = bestThrall.hasRequirements();
+                    // Manual requirement checks
+                    boolean hasBookOfDead = Rs2Inventory.hasItem(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD) 
+                            || Rs2Equipment.isWearing(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD);
+                    boolean correctSpellbook = Rs2Magic.isSpellbook(net.runelite.client.plugins.microbot.util.magic.Rs2Spellbook.ARCEUUS);
+                    boolean hasLevel = Microbot.getClient().getRealSkillLevel(net.runelite.api.Skill.MAGIC) >= bestThrall.getRequiredLevel();
                     boolean hasRunes = Rs2Magic.hasRequiredRunes(bestThrall);
-                    Microbot.log("Thrall casting check - Requirements: " + hasRequirements + ", Runes: " + hasRunes);
                     
-                    if (hasRequirements && hasRunes) {
-                        statusText = "Summoning thrall...";
-                        Microbot.log("Attempting to cast thrall: " + bestThrall.getName());
+                    Microbot.log("Book of Dead: " + hasBookOfDead);
+                    Microbot.log("Arceuus spellbook: " + correctSpellbook);
+                    Microbot.log("Has level " + bestThrall.getRequiredLevel() + ": " + hasLevel);
+                    Microbot.log("Has runes: " + hasRunes);
+                    
+                    if (hasBookOfDead && correctSpellbook && hasLevel && hasRunes) {
+                        statusText = "Casting " + bestThrall.getName();
+                        Microbot.log(">>> CASTING THRALL: " + bestThrall.getName() + " <<<");
+                        
                         if (Rs2Magic.cast(bestThrall)) {
-                            Microbot.log("Successfully cast thrall: " + bestThrall.getName());
+                            Microbot.log("✓ Successfully cast thrall: " + bestThrall.getName());
                             sleep(600, 800);
                         } else {
-                            Microbot.log("Failed to cast thrall: " + bestThrall.getName());
+                            Microbot.log("✗ Rs2Magic.cast returned false for: " + bestThrall.getName());
                         }
+                    } else {
+                        Microbot.log("✗ Failed requirement checks - cannot cast thrall");
                     }
+                } else {
+                    Microbot.log("✗ No thrall found for type: " + wantedType);
                 }
+            } else {
+                Microbot.log("Thrall not ready - Active: " + thrallActive + ", Cooldown: " + thrallCooldown);
             }
+            Microbot.log("=== END THRALL CHECK ===");
         }
 
         // ── Spec / Punish weapons (melee only) ──
