@@ -111,6 +111,7 @@ public class TormentedDemonScript extends Script {
     // Spec & punish tracking
     private volatile long shieldBrokenTick = 0;
     private long lastPunishTick = 0;
+    private long lastSpecTick = 0;
     private static final int SHIELD_DOWN_DURATION_TICKS = 25; // ~15 seconds after shield break animation
     private static final int PUNISH_COOLDOWN_TICKS = 8; // minimum ticks between punish swaps
 
@@ -446,8 +447,13 @@ public class TormentedDemonScript extends Script {
             if (config.useSpecWeapon()) {
                 int specEnergy = Rs2Combat.getSpecEnergy();
                 int costRaw = config.specEnergyCost() * 10;
-                if (specEnergy >= costRaw) {
+                long currentTick = Microbot.getClient().getTickCount();
+                long ticksSinceLastSpec = currentTick - lastSpecTick;
+                
+                // Check if we have enough spec energy AND cooldown has passed
+                if (specEnergy >= costRaw && ticksSinceLastSpec >= config.specAttackCooldown()) {
                     performSpecAttack(config);
+                    lastSpecTick = currentTick;
                     return;
                 }
             }
@@ -474,15 +480,28 @@ public class TormentedDemonScript extends Script {
 
         // ── Thralls ──
         if (config.useThralls()) {
-            // Check if thrall is on cooldown (don't wait for it to expire, just check cooldown)
+            // Check if thrall is active (buff not expired) OR cooldown is active
+            int thrallActive = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_ACTIVE);
             int thrallCooldown = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_COOLDOWN);
-            if (thrallCooldown == 0) {
+            
+            // Only try to cast if BOTH are 0 (no active thrall AND no cooldown)
+            if (thrallActive == 0 && thrallCooldown == 0) {
                 Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
-                if (bestThrall != null && Rs2Thrall.canCast(bestThrall)) {
-                    statusText = "Summoning thrall...";
-                    if (Rs2Thrall.cast(bestThrall)) {
-                        logOnce("Summoned thrall: " + bestThrall.getName());
-                        sleep(600, 800);
+                if (bestThrall != null) {
+                    // Check requirements without the isActive check
+                    boolean hasRequirements = bestThrall.hasRequirements();
+                    boolean hasRunes = Rs2Magic.hasRequiredRunes(bestThrall);
+                    
+                    if (hasRequirements && hasRunes) {
+                        statusText = "Summoning thrall...";
+                        if (Rs2Magic.cast(bestThrall)) {
+                            logOnce("Summoned thrall: " + bestThrall.getName());
+                            sleep(600, 800);
+                        } else {
+                            logOnce("Failed to cast thrall: " + bestThrall.getName());
+                        }
+                    } else {
+                        logOnce("Cannot cast thrall - Requirements: " + hasRequirements + ", Runes: " + hasRunes);
                     }
                 }
             }
@@ -1122,6 +1141,7 @@ public class TormentedDemonScript extends Script {
         travelStep = TravelStep.TELEPORT;
         shieldBrokenTick = 0;
         lastPunishTick = 0;
+        lastSpecTick = 0;
         statusText = "Stopped.";
     }
 }
