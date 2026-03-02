@@ -8,6 +8,7 @@ import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.GraphicsObjectCreated;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.Microbot;
@@ -89,17 +90,6 @@ public class TormentedDemonPlugin extends Plugin {
      */
     private static final int FIRE_BOMB_AOE_RADIUS = 1;
 
-    /**
-     * Minimum Chebyshev distance from ALL fire bomb centers for a tile to be considered safe.
-     * Must be > AoE radius to guarantee safety.
-     */
-    private static final int SAFE_DISTANCE = 2;
-
-    /**
-     * Search radius around the player when looking for safe tiles.
-     */
-    private static final int DODGE_SEARCH_RADIUS = 5;
-
     // ─── Injected dependencies ──────────────────────────────────────────────────
 
     @Inject
@@ -165,6 +155,19 @@ public class TormentedDemonPlugin extends Plugin {
         }
     }
 
+    // ─── Config Button Handling ──────────────────────────────────────────────
+
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event) {
+        if (!TormentedDemonConfig.GROUP.equals(event.getGroup())) {
+            return;
+        }
+
+        if ("walkToDemons".equals(event.getKey())) {
+            script.manualWalkToDemons();
+        }
+    }
+
     // ─── Fire Bomb Dodging ──────────────────────────────────────────────────────
 
     /**
@@ -191,8 +194,10 @@ public class TormentedDemonPlugin extends Plugin {
                 : WorldPoint.fromLocal(Microbot.getClient(), gfx.getLocation());
         if (bombCenter == null) return;
 
-        // Track this fire bomb (4 ticks = 2400ms duration)
-        int dangerDurationMs = 600 * 4;
+        if (!config.enableDodge()) return;
+
+        // Track this fire bomb using configurable duration
+        int dangerDurationMs = 600 * config.fireBombDuration();
         activeFireBombs.merge(bombCenter, dangerDurationMs, Math::max);
 
         int clickCount = config.dodgeClickCount();
@@ -222,6 +227,9 @@ public class TormentedDemonPlugin extends Plugin {
         WorldPoint playerLoc = Rs2Player.getWorldLocation();
         if (playerLoc == null) return;
 
+        int safeDistance = config.dodgeSafeDistance();
+        int searchRadius = config.dodgeSearchRadius();
+
         // Check if the player is within the 3×3 AoE of any fire bomb
         boolean inDanger = activeFireBombs.keySet().stream()
                 .anyMatch(bomb -> chebyshevDistance(playerLoc, bomb) <= FIRE_BOMB_AOE_RADIUS);
@@ -235,7 +243,7 @@ public class TormentedDemonPlugin extends Plugin {
             targetLoc = target.getRuneliteNpc().getWorldLocation();
         }
 
-        WorldPoint safeTile = calculateSafeTile(playerLoc, targetLoc);
+        WorldPoint safeTile = calculateSafeTile(playerLoc, targetLoc, safeDistance, searchRadius);
         if (safeTile == null || safeTile.equals(playerLoc)) {
             log.warn("No safe tile found for fire bomb dodge!");
             return;
@@ -276,21 +284,24 @@ public class TormentedDemonPlugin extends Plugin {
      *   <li>Tiles closest to the combat target (stay in fight range)</li>
      * </ol>
      *
-     * @param playerLoc current player world point
-     * @param targetLoc current target NPC world point (nullable)
+     * @param playerLoc    current player world point
+     * @param targetLoc    current target NPC world point (nullable)
+     * @param safeDistance minimum Chebyshev distance from all bomb centers
+     * @param searchRadius how many tiles around the player to search
      * @return the best safe tile, or null if none found
      */
-    private WorldPoint calculateSafeTile(WorldPoint playerLoc, WorldPoint targetLoc) {
+    private WorldPoint calculateSafeTile(WorldPoint playerLoc, WorldPoint targetLoc,
+                                         int safeDistance, int searchRadius) {
         WorldPoint bestTile = null;
         int bestScore = Integer.MAX_VALUE;
 
-        for (int dx = -DODGE_SEARCH_RADIUS; dx <= DODGE_SEARCH_RADIUS; dx++) {
-            for (int dy = -DODGE_SEARCH_RADIUS; dy <= DODGE_SEARCH_RADIUS; dy++) {
+        for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+            for (int dy = -searchRadius; dy <= searchRadius; dy++) {
                 WorldPoint candidate = playerLoc.dx(dx).dy(dy);
 
                 // Must be far enough from ALL fire bomb centers
                 boolean safe = activeFireBombs.keySet().stream()
-                        .allMatch(bomb -> chebyshevDistance(candidate, bomb) >= SAFE_DISTANCE);
+                        .allMatch(bomb -> chebyshevDistance(candidate, bomb) >= safeDistance);
                 if (!safe) continue;
 
                 // Must be walkable

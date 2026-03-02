@@ -16,7 +16,9 @@ import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
                 + "  <li>Select a <b>Banking Setup</b> from the Inventory Setups plugin for restocking.</li>"
                 + "  <li>Enable at least 2 combat styles so the bot can switch off the demon's protection prayer.</li>"
                 + "</ol>"
-                + "<b>Full Auto</b> requires Guthixian temple teleport scrolls and a Ring of Dueling in your bank setup.<br/>"
+                + "<b>Full Auto Banking Methods:</b><br/>"
+                + "&bull; <b>Ferox</b>: Ring of Dueling → Ferox pool → bank → Guthixian temple teleport scroll<br/>"
+                + "&bull; <b>POH Jewellery Box</b>: Teleport to house → ornate pool → jewellery box to GE → bank → Master Scroll Book to Guthixian Temple<br/><br/>"
                 + "<b>Combat Only</b>: Stand near the demons and start."
 )
 @ConfigGroup(TormentedDemonConfig.GROUP)
@@ -42,6 +44,39 @@ public interface TormentedDemonConfig extends Config {
     )
     default Mode mode() {
         return Mode.FULL_AUTO;
+    }
+
+    @ConfigItem(
+            keyName = "bankingMethod",
+            name = "Banking Method",
+            description = "How to bank between trips (Full Auto only)",
+            section = generalSection,
+            position = 1
+    )
+    default BankingMethod bankingMethod() {
+        return BankingMethod.FEROX;
+    }
+
+    @ConfigItem(
+            keyName = "travelMethod",
+            name = "Travel to Demons",
+            description = "How to teleport back to the Guthixian Temple after banking",
+            section = generalSection,
+            position = 2
+    )
+    default TravelMethod travelMethod() {
+        return TravelMethod.SCROLL;
+    }
+
+    @ConfigItem(
+            keyName = "walkToDemons",
+            name = "Walk to Demons",
+            description = "Manually walk from the Guthixian Temple to the Tormented Demon area (use after teleporting yourself)",
+            section = generalSection,
+            position = 3
+    )
+    default ConfigButton walkToDemons() {
+        return new ConfigButton();
     }
 
     // ─── Gear Setups ────────────────────────────────────────────────────────────
@@ -159,42 +194,6 @@ public interface TormentedDemonConfig extends Config {
     )
     default boolean enableOffensivePrayer() {
         return true;
-    }
-
-    @ConfigItem(
-            keyName = "dodgeDelay",
-            name = "Fire Bomb Dodge Delay (ms)",
-            description = "Delay before processing fire bomb dodge. Increase if dodging too early.",
-            section = combatSection,
-            position = 2
-    )
-    @Range(min = 0, max = 2000)
-    default int dodgeDelay() {
-        return 600;
-    }
-
-    @ConfigItem(
-            keyName = "dodgeClickCount",
-            name = "Dodge Click Count",
-            description = "Number of times to register a dodge walk when a fire bomb is detected (spam click for reliability)",
-            section = combatSection,
-            position = 3
-    )
-    @Range(min = 1, max = 5)
-    default int dodgeClickCount() {
-        return 1;
-    }
-
-    @ConfigItem(
-            keyName = "dodgeClickInterval",
-            name = "Dodge Click Interval (ms)",
-            description = "Delay between each dodge click (only relevant if dodge click count > 1)",
-            section = combatSection,
-            position = 4
-    )
-    @Range(min = 50, max = 300)
-    default int dodgeClickInterval() {
-        return 100;
     }
 
     @ConfigItem(
@@ -332,12 +331,104 @@ public interface TormentedDemonConfig extends Config {
         return false;
     }
 
+    // ─── Fire Bomb Dodge ─────────────────────────────────────────────────────────
+
+    @ConfigSection(
+            name = "Fire Bomb Dodge",
+            description = "Dodge behaviour when the demon throws fire bombs",
+            position = 3
+    )
+    String dodgeSection = "fireBombDodge";
+
+    @ConfigItem(
+            keyName = "enableDodge",
+            name = "Enable Dodge",
+            description = "Automatically dodge fire bombs thrown by the demon",
+            section = dodgeSection,
+            position = 0
+    )
+    default boolean enableDodge() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeDelay",
+            name = "Dodge Delay (ms)",
+            description = "Delay before processing fire bomb dodge. Increase if dodging too early.",
+            section = dodgeSection,
+            position = 1
+    )
+    @Range(min = 0, max = 2000)
+    default int dodgeDelay() {
+        return 600;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeClickCount",
+            name = "Dodge Click Count",
+            description = "Number of walk clicks per dodge (spam click for reliability)",
+            section = dodgeSection,
+            position = 2
+    )
+    @Range(min = 1, max = 15)
+    default int dodgeClickCount() {
+        return 3;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeClickInterval",
+            name = "Click Interval (ms)",
+            description = "Delay between each dodge click (only relevant if click count > 1)",
+            section = dodgeSection,
+            position = 3
+    )
+    @Range(min = 50, max = 300)
+    default int dodgeClickInterval() {
+        return 100;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeSafeDistance",
+            name = "Safe Distance",
+            description = "Minimum Chebyshev distance from all fire bomb centers for a tile to be safe (2 = one tile gap)",
+            section = dodgeSection,
+            position = 4
+    )
+    @Range(min = 2, max = 5)
+    default int dodgeSafeDistance() {
+        return 2;
+    }
+
+    @ConfigItem(
+            keyName = "dodgeSearchRadius",
+            name = "Search Radius",
+            description = "How many tiles around the player to search for a safe dodge tile",
+            section = dodgeSection,
+            position = 5
+    )
+    @Range(min = 3, max = 10)
+    default int dodgeSearchRadius() {
+        return 5;
+    }
+
+    @ConfigItem(
+            keyName = "fireBombDuration",
+            name = "Bomb Duration (ticks)",
+            description = "How many game ticks a fire bomb stays dangerous (1 tick = 600ms)",
+            section = dodgeSection,
+            position = 6
+    )
+    @Range(min = 1, max = 10)
+    default int fireBombDuration() {
+        return 4;
+    }
+
     // ─── Food & Potions ─────────────────────────────────────────────────────────
 
     @ConfigSection(
             name = "Food & Potions",
             description = "Eating, drinking, and retreat thresholds",
-            position = 3
+            position = 4
     )
     String suppliesSection = "supplies";
 
@@ -450,7 +541,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigSection(
             name = "Looting",
             description = "Loot filter settings",
-            position = 4
+            position = 5
     )
     String lootingSection = "looting";
 
@@ -490,7 +581,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "lootSmoulderingFlesh",
             name = "Loot Smouldering Flesh",
-            description = "Automatically loot 'Smouldering pile of flesh' for healing during combat (heals 10 HP)",
+            description = "Automatically loot 'Smouldering pile of flesh' for healing during combat (heals 10 HP, can overheal above max HP)",
             section = lootingSection,
             position = 3
     )
@@ -501,13 +592,13 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "smoulderingFleshHpThreshold",
             name = "Flesh HP Threshold %",
-            description = "Loot smouldering flesh when HP drops below this percentage",
+            description = "Loot smouldering flesh when HP is at or below this percentage. Set to 100 to always pick up (overheals)",
             section = lootingSection,
             position = 4
     )
-    @Range(min = 20, max = 90)
+    @Range(min = 20, max = 100)
     default int smoulderingFleshHpThreshold() {
-        return 60;
+        return 90;
     }
 
     @ConfigItem(
@@ -528,9 +619,20 @@ public interface TormentedDemonConfig extends Config {
             section = lootingSection,
             position = 6
     )
-    @Range(min = 10, max = 80)
+    @Range(min = 10, max = 90)
     default int smoulderingGlandPrayerThreshold() {
-        return 40;
+        return 50;
+    }
+
+    @ConfigItem(
+            keyName = "lootSmoulderingHeart",
+            name = "Loot Smouldering Heart",
+            description = "Automatically loot 'Smouldering heart' during combat (boosts Attack, Strength, Ranged, Magic by 2)",
+            section = lootingSection,
+            position = 7
+    )
+    default boolean lootSmoulderingHeart() {
+        return true;
     }
 
     // ─── Enums ──────────────────────────────────────────────────────────────────
@@ -579,6 +681,32 @@ public interface TormentedDemonConfig extends Config {
 
     enum CombatStyle {
         MELEE, RANGED, MAGIC
+    }
+
+    @Getter
+    @RequiredArgsConstructor
+    enum BankingMethod {
+        FEROX("Ferox Enclave"),
+        POH_JEWELLERY_BOX("POH → Jewellery Box → GE");
+        private final String name;
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
+    @Getter
+    @RequiredArgsConstructor
+    enum TravelMethod {
+        SCROLL("Guthixian Temple Scroll"),
+        MASTER_SCROLL_BOOK("Master Scroll Book");
+        private final String name;
+
+        @Override
+        public String toString() {
+            return name;
+        }
     }
 }
 
