@@ -15,6 +15,8 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
 import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.niriTormentedDemons.TormentedDemonConfig.CombatStyle;
+import net.runelite.client.plugins.microbot.niriTormentedDemons.TormentedDemonConfig.BankingMethod;
+import net.runelite.client.plugins.microbot.niriTormentedDemons.TormentedDemonConfig.TravelMethod;
 import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.equipment.JewelleryLocationEnum;
@@ -31,9 +33,12 @@ import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
 import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
 import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.poh.PohTeleports;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
+import net.runelite.api.widgets.Widget;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -61,6 +66,8 @@ public class TormentedDemonScript extends Script {
     private static final String TD_NAME = "Tormented Demon";
     private static final int FEROX_POOL_ID = 39651;
     private static final WorldPoint FEROX_AREA = new WorldPoint(3150, 3634, 0);
+    private static final WorldPoint GE_AREA = new WorldPoint(3164, 3487, 0);
+    private static final int ORNATE_REJUV_POOL_ID = 29241;
 
     /**
      * Items that are ALWAYS looted regardless of config or mode.
@@ -85,7 +92,9 @@ public class TormentedDemonScript extends Script {
     }
 
     private enum BankStep {
-        TRAVEL_TO_FEROX, RESTORE, OPEN_BANK, LOAD_SETUP
+        TRAVEL_TO_FEROX, RESTORE, OPEN_BANK, LOAD_SETUP,
+        // POH steps
+        POH_RESTORE, POH_JEWELLERY_BOX, GE_OPEN_BANK, GE_LOAD_SETUP
     }
 
     private enum TravelStep {
@@ -139,7 +148,12 @@ public class TormentedDemonScript extends Script {
             botState = BotState.BANKING;
         }
 
-        bankStep = BankStep.RESTORE;
+        // Set initial bank step based on banking method
+        if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX) {
+            bankStep = BankStep.POH_RESTORE;
+        } else {
+            bankStep = BankStep.RESTORE;
+        }
         travelStep = TravelStep.TELEPORT;
 
         mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
@@ -177,6 +191,7 @@ public class TormentedDemonScript extends Script {
         }
 
         switch (bankStep) {
+            // ── Ferox steps ──
             case TRAVEL_TO_FEROX:
                 statusText = "Travelling to Ferox...";
                 if (playerLocation().distanceTo(FEROX_AREA) <= 20) {
@@ -261,6 +276,94 @@ public class TormentedDemonScript extends Script {
                     shutdown();
                 }
                 break;
+
+            // ── POH Jewellery Box steps ──
+            case POH_RESTORE:
+                statusText = "Restoring at POH pool...";
+                if (!PohTeleports.isInHouse()) {
+                    // We should be in our house; if not, something went wrong
+                    logOnce("Not in POH — retrying teleport to house...");
+                    if (Rs2Inventory.interact(config.teleportItem(), "break")
+                            || Rs2Inventory.interact(config.teleportItem(), "teleport")
+                            || Rs2Inventory.interact(config.teleportItem(), "rub")) {
+                        Rs2Player.waitForAnimation();
+                        sleepUntil(PohTeleports::isInHouse, 6000);
+                    }
+                    break;
+                }
+                int pohHp = Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS);
+                int pohMaxHp = Microbot.getClient().getRealSkillLevel(Skill.HITPOINTS);
+                int pohPray = Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER);
+                int pohMaxPray = Microbot.getClient().getRealSkillLevel(Skill.PRAYER);
+
+                if (pohHp < pohMaxHp || pohPray < pohMaxPray) {
+                    if (Rs2GameObject.interact(ORNATE_REJUV_POOL_ID, "Drink")) {
+                        sleepUntil(() -> {
+                            int curHp = Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS);
+                            int curPray = Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER);
+                            return curHp >= pohMaxHp && curPray >= pohMaxPray;
+                        }, 5000);
+                    } else {
+                        logOnce("Ornate rejuvenation pool not found in POH!");
+                    }
+                }
+                bankStep = BankStep.POH_JEWELLERY_BOX;
+                break;
+
+            case POH_JEWELLERY_BOX:
+                statusText = "Using jewellery box to GE...";
+                if (!PohTeleports.isInHouse()) {
+                    bankStep = BankStep.POH_RESTORE;
+                    break;
+                }
+                if (PohTeleports.useJewelleryBox(JewelleryLocationEnum.GRAND_EXCHANGE)) {
+                    sleepUntil(() -> !PohTeleports.isInHouse(), 6000);
+                    sleep(600, 1000);
+                    sleepUntil(() -> playerLocation().distanceTo(GE_AREA) <= 20, 8000);
+                    bankStep = BankStep.GE_OPEN_BANK;
+                } else {
+                    logOnce("Failed to use jewellery box — do you have an ornate jewellery box?");
+                }
+                break;
+
+            case GE_OPEN_BANK:
+                statusText = "Opening bank at GE...";
+                if (Rs2Bank.isOpen()) {
+                    Rs2Bank.depositAll();
+                    sleep(300, 500);
+                    bankStep = BankStep.GE_LOAD_SETUP;
+                } else {
+                    if (!Rs2Bank.isNearBank(15)) {
+                        Rs2Bank.walkToBank();
+                        sleep(600, 1000);
+                    } else {
+                        Rs2Bank.openBank();
+                        sleepUntil(Rs2Bank::isOpen, 5000);
+                    }
+                }
+                break;
+
+            case GE_LOAD_SETUP:
+                statusText = "Loading gear & inventory...";
+                if (!Rs2Bank.isOpen()) {
+                    bankStep = BankStep.GE_OPEN_BANK;
+                    break;
+                }
+                Rs2InventorySetup geSetup = new Rs2InventorySetup(bankSetup, mainScheduledFuture);
+                boolean geEquipOk = geSetup.loadEquipment();
+                boolean geInvOk = geSetup.loadInventory();
+
+                if (geEquipOk && geInvOk) {
+                    Rs2Bank.closeBank();
+                    sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
+                    bankStep = BankStep.POH_RESTORE;
+                    botState = BotState.TRAVELLING;
+                    logOnce("Banking complete, heading to demons.");
+                } else {
+                    logOnce("Failed to load setup — missing items? Shutting down.");
+                    shutdown();
+                }
+                break;
         }
     }
 
@@ -276,12 +379,47 @@ public class TormentedDemonScript extends Script {
         switch (travelStep) {
             case TELEPORT:
                 statusText = "Teleporting to Guthixian Temple...";
-                if (Rs2Inventory.interact("Guthixian temple teleport", "Teleport")) {
-                    sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
-                    sleep(1200, 1800);
-                    travelStep = TravelStep.CLIMB_FIRST;
+                if (config.travelMethod() == TravelMethod.MASTER_SCROLL_BOOK) {
+                    // Use Master Scroll Book to teleport
+                    if (Rs2Inventory.interact("Master scroll book", "Activate")) {
+                        sleep(600, 1000);
+                        // The handleMasterScrollBook in Rs2Walker reads the widget
+                        // We use the widget directly
+                        sleepUntil(() -> Rs2Widget.isWidgetVisible(
+                                net.runelite.api.gameval.InterfaceID.Bookofscrolls.CONTENTS), 5000);
+                        if (Rs2Widget.isWidgetVisible(
+                                net.runelite.api.gameval.InterfaceID.Bookofscrolls.CONTENTS)) {
+                            Widget bookWidget = Rs2Widget.getWidget(
+                                    net.runelite.api.gameval.InterfaceID.Bookofscrolls.CONTENTS);
+                            if (bookWidget != null) {
+                                Widget dest = Rs2Widget.findWidget("Guthixian Temple",
+                                        java.util.Arrays.stream(bookWidget.getStaticChildren())
+                                                .filter(java.util.Objects::nonNull)
+                                                .collect(java.util.stream.Collectors.toList()), false);
+                                if (dest != null) {
+                                    Rs2Widget.clickWidget(dest);
+                                    sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+                                    sleep(1200, 1800);
+                                    travelStep = TravelStep.CLIMB_FIRST;
+                                } else {
+                                    logOnce("Guthixian Temple not found in Master Scroll Book! Do you have scrolls loaded?");
+                                }
+                            }
+                        } else {
+                            logOnce("Master Scroll Book interface did not open!");
+                        }
+                    } else {
+                        logOnce("Master Scroll Book not found in inventory!");
+                    }
                 } else {
-                    logOnce("No Guthixian temple teleport found!");
+                    // Use regular Guthixian temple teleport scroll
+                    if (Rs2Inventory.interact("Guthixian temple teleport", "Teleport")) {
+                        sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+                        sleep(1200, 1800);
+                        travelStep = TravelStep.CLIMB_FIRST;
+                    } else {
+                        logOnce("No Guthixian temple teleport found!");
+                    }
                 }
                 break;
 
@@ -326,6 +464,49 @@ public class TormentedDemonScript extends Script {
 
     // ─── Fighting ───────────────────────────────────────────────────────────────
 
+    /**
+     * Manual walk from the Guthixian Temple entrance to the Tormented Demon area.
+     * Triggered by the "Walk to Demons" button in the config panel.
+     * Runs on a separate thread to avoid blocking the client.
+     */
+    public void manualWalkToDemons() {
+        new Thread(() -> {
+            try {
+                statusText = "Manual walk: climbing first stairs...";
+                logOnce("Manual walk to demons started.");
+                if (Rs2GameObject.interact(FIRST_STAIRS_ID, "Climb-up")) {
+                    sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+                    sleep(600, 1000);
+                }
+
+                statusText = "Manual walk: climbing second stairs...";
+                if (Rs2GameObject.interact(SECOND_STAIRS_ID, "Climb-up")) {
+                    sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+                    sleep(600, 1000);
+                }
+
+                statusText = "Manual walk: climbing through...";
+                if (Rs2GameObject.interact(CLIMB_THROUGH_ID, "Climb-through")) {
+                    sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+                    sleep(600, 1000);
+                }
+
+                statusText = "Manual walk: walking to Tormented Demons...";
+                if (Rs2Walker.walkTo(TD_FIGHT_AREA, 4)) {
+                    sleepUntil(() -> playerLocation().distanceTo(TD_FIGHT_AREA) <= 6, 15000);
+                    logOnce("Manual walk complete — arrived at demons.");
+                    statusText = "Arrived at demons.";
+                } else {
+                    logOnce("Manual walk: failed to path to demon area.");
+                    statusText = "Walk failed.";
+                }
+            } catch (Exception e) {
+                log.error("Error during manual walk to demons", e);
+                statusText = "Walk error.";
+            }
+        }, "ManualWalkToDemons").start();
+    }
+
     private void handleFighting(TormentedDemonConfig config) {
         Player localPlayer = Microbot.getClient().getLocalPlayer();
         if (localPlayer == null) return;
@@ -359,8 +540,13 @@ public class TormentedDemonScript extends Script {
             statusText = "Retreating to bank...";
             disableAllPrayers();
             currentTarget = null;
-            teleportToFerox();
-            bankStep = BankStep.RESTORE;
+            if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX) {
+                teleportToHouse(config);
+                bankStep = BankStep.POH_RESTORE;
+            } else {
+                teleportToFerox();
+                bankStep = BankStep.RESTORE;
+            }
             botState = BotState.BANKING;
             return;
         }
@@ -774,10 +960,13 @@ public class TormentedDemonScript extends Script {
     // ─── Looting ────────────────────────────────────────────────────────────────
 
     /**
-     * Opportunistically loot smouldering drops during combat for emergency healing/prayer.
-     * These drops appear on the ground while fighting and provide instant restoration:
-     * - Smouldering pile of flesh: heals 10 HP
-     * - Smouldering gland: restores 10 prayer points
+     * Opportunistically loot smouldering drops during combat for instant restoration.
+     * These drops appear on the ground while fighting and provide immediate effects on pickup:
+     * <ul>
+     *   <li>Smouldering pile of flesh: heals 10 HP (can overheal above max)</li>
+     *   <li>Smouldering gland: restores 10 prayer points</li>
+     *   <li>Smouldering heart: boosts Attack, Strength, Ranged, and Magic by 2</li>
+     * </ul>
      */
     private void lootSmoulderingDropsIfNeeded(TormentedDemonConfig config) {
         int hpPercent = getHpPercent();
@@ -785,11 +974,12 @@ public class TormentedDemonScript extends Script {
         int maxPrayer = Microbot.getClient().getRealSkillLevel(Skill.PRAYER);
         int prayerPercent = maxPrayer > 0 ? (prayer * 100) / maxPrayer : 100;
 
-        // Loot smouldering flesh if HP is low
+        // Loot smouldering flesh if HP is at or below threshold (can overheal)
         if (config.lootSmoulderingFlesh() && hpPercent <= config.smoulderingFleshHpThreshold()) {
             if (Rs2GroundItem.exists("Smouldering pile of flesh", 10)) {
-                statusText = "Emergency loot: flesh for healing";
+                statusText = "Loot: flesh for healing";
                 if (Rs2GroundItem.loot("Smouldering pile of flesh", 10)) {
+                    logOnce("Picked up smouldering flesh (HP was " + hpPercent + "%)");
                     sleep(300, 600);
                 }
             }
@@ -798,8 +988,20 @@ public class TormentedDemonScript extends Script {
         // Loot smouldering gland if prayer is low
         if (config.lootSmoulderingGland() && prayerPercent <= config.smoulderingGlandPrayerThreshold()) {
             if (Rs2GroundItem.exists("Smouldering gland", 10)) {
-                statusText = "Emergency loot: gland for prayer";
+                statusText = "Loot: gland for prayer";
                 if (Rs2GroundItem.loot("Smouldering gland", 10)) {
+                    logOnce("Picked up smouldering gland (Prayer was " + prayerPercent + "%)");
+                    sleep(300, 600);
+                }
+            }
+        }
+
+        // Loot smouldering heart for combat stat boost
+        if (config.lootSmoulderingHeart()) {
+            if (Rs2GroundItem.exists("Smouldering heart", 10)) {
+                statusText = "Loot: heart for stat boost";
+                if (Rs2GroundItem.loot("Smouldering heart", 10)) {
+                    logOnce("Picked up smouldering heart for combat boost");
                     sleep(300, 600);
                 }
             }
@@ -927,6 +1129,34 @@ public class TormentedDemonScript extends Script {
         }
 
         logOnce("No Ring of Dueling found for retreat!");
+    }
+
+    /**
+     * Teleport to the Player Owned House using the configured teleport item.
+     * Used for the POH banking method.
+     */
+    private void teleportToHouse(TormentedDemonConfig config) {
+        if (PohTeleports.isInHouse()) return;
+
+        String teleItem = config.teleportItem();
+        if (!teleItem.isEmpty() && Rs2Inventory.hasItem(teleItem)) {
+            if (!Rs2Inventory.interact(teleItem, "break")) {
+                if (!Rs2Inventory.interact(teleItem, "rub")) {
+                    if (!Rs2Inventory.interact(teleItem, "teleport")) {
+                        Rs2Inventory.interact(teleItem);
+                    }
+                }
+            }
+            Rs2Player.waitForAnimation();
+            sleepUntil(PohTeleports::isInHouse, 6000);
+            if (PohTeleports.isInHouse()) {
+                logOnce("Teleported to POH.");
+            } else {
+                logOnce("Failed to teleport to POH!");
+            }
+        } else {
+            logOnce("No teleport to house item found: " + teleItem);
+        }
     }
 
     // ─── Spec Weapon ────────────────────────────────────────────────────────────
@@ -1102,7 +1332,16 @@ public class TormentedDemonScript extends Script {
             // After teleport, stop the script or return to banking
             if (config.mode() == TormentedDemonConfig.Mode.FULL_AUTO) {
                 botState = BotState.BANKING;
-                bankStep = BankStep.RESTORE;
+                // If emergency TP goes to house and we're using POH method, start POH flow
+                if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX
+                        && PohTeleports.isInHouse()) {
+                    bankStep = BankStep.POH_RESTORE;
+                } else if (PohTeleports.isInHouse()) {
+                    // Emergency TP'd to house but using Ferox banking — exit house first
+                    bankStep = BankStep.TRAVEL_TO_FEROX;
+                } else {
+                    bankStep = BankStep.RESTORE;
+                }
             }
         } else {
             logOnce("Emergency teleport item not found: " + teleItem);
