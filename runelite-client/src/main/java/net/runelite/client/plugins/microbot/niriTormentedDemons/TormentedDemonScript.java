@@ -441,6 +441,36 @@ public class TormentedDemonScript extends Script {
             }
         }
 
+        // ── Thralls (cast before weapon swaps to avoid early returns) ──
+        if (config.useThralls()) {
+            int thrallActive = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_ACTIVE);
+            int thrallCooldown = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_COOLDOWN);
+            
+            Microbot.log("Thrall check - Active: " + thrallActive + ", Cooldown: " + thrallCooldown + ", Config enabled: " + config.useThralls());
+            
+            if (thrallActive == 0 && thrallCooldown == 0) {
+                Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
+                Microbot.log("Best thrall found: " + (bestThrall != null ? bestThrall.getName() : "null") + ", Type: " + config.thrallType());
+                
+                if (bestThrall != null) {
+                    boolean hasRequirements = bestThrall.hasRequirements();
+                    boolean hasRunes = Rs2Magic.hasRequiredRunes(bestThrall);
+                    Microbot.log("Thrall casting check - Requirements: " + hasRequirements + ", Runes: " + hasRunes);
+                    
+                    if (hasRequirements && hasRunes) {
+                        statusText = "Summoning thrall...";
+                        Microbot.log("Attempting to cast thrall: " + bestThrall.getName());
+                        if (Rs2Magic.cast(bestThrall)) {
+                            Microbot.log("Successfully cast thrall: " + bestThrall.getName());
+                            sleep(600, 800);
+                        } else {
+                            Microbot.log("Failed to cast thrall: " + bestThrall.getName());
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Spec / Punish weapons (melee only) ──
         if (activeCombatStyle == CombatStyle.MELEE && currentTarget != null && !currentTarget.isDead()) {
             // Spec with Burning Claws (or configured spec weapon)
@@ -476,35 +506,6 @@ public class TormentedDemonScript extends Script {
         // ── Rapid Restore ──
         if (config.useRapidHeal() && !Rs2Prayer.isPrayerActive(Rs2PrayerEnum.RAPID_HEAL)) {
             Rs2Prayer.toggle(Rs2PrayerEnum.RAPID_HEAL, true);
-        }
-
-        // ── Thralls ──
-        if (config.useThralls()) {
-            // Check if thrall is active (buff not expired) OR cooldown is active
-            int thrallActive = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_ACTIVE);
-            int thrallCooldown = Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.ARCEUUS_RESURRECTION_COOLDOWN);
-            
-            // Only try to cast if BOTH are 0 (no active thrall AND no cooldown)
-            if (thrallActive == 0 && thrallCooldown == 0) {
-                Rs2Thrall bestThrall = Rs2Thrall.getBestThrall(config.thrallType());
-                if (bestThrall != null) {
-                    // Check requirements without the isActive check
-                    boolean hasRequirements = bestThrall.hasRequirements();
-                    boolean hasRunes = Rs2Magic.hasRequiredRunes(bestThrall);
-                    
-                    if (hasRequirements && hasRunes) {
-                        statusText = "Summoning thrall...";
-                        if (Rs2Magic.cast(bestThrall)) {
-                            logOnce("Summoned thrall: " + bestThrall.getName());
-                            sleep(600, 800);
-                        } else {
-                            logOnce("Failed to cast thrall: " + bestThrall.getName());
-                        }
-                    } else {
-                        logOnce("Cannot cast thrall - Requirements: " + hasRequirements + ", Runes: " + hasRunes);
-                    }
-                }
-            }
         }
 
         // ── Death Charge ──
