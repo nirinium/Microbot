@@ -467,12 +467,22 @@ public class TormentedDemonScript extends Script {
                             || Rs2Equipment.isWearing(net.runelite.api.gameval.ItemID.BOOK_OF_THE_DEAD);
                     boolean correctSpellbook = Rs2Magic.isSpellbook(net.runelite.client.plugins.microbot.util.magic.Rs2Spellbook.ARCEUUS);
                     boolean hasLevel = Microbot.getClient().getRealSkillLevel(net.runelite.api.Skill.MAGIC) >= bestThrall.getRequiredLevel();
-                    boolean hasRunes = Rs2Magic.hasRequiredRunes(bestThrall);
+                    
+                    // Custom rune check that accounts for combination runes like Aether
+                    // Greater thralls need: Fire (10), Cosmic (1), Blood (5)
+                    boolean hasFireRunes = Rs2Inventory.hasItem("Fire rune") || Rs2Inventory.hasItem("Lava rune") 
+                            || Rs2Inventory.hasItem("Smoke rune") || Rs2Inventory.hasItem("Steam rune");
+                    boolean hasCosmicRunes = Rs2Inventory.hasItem("Cosmic rune") || Rs2Inventory.hasItem("Aether rune");
+                    boolean hasBloodRunes = Rs2Inventory.hasItem("Blood rune");
+                    boolean hasRunes = hasFireRunes && hasCosmicRunes && hasBloodRunes;
                     
                     Microbot.log("Book of Dead: " + hasBookOfDead);
                     Microbot.log("Arceuus spellbook: " + correctSpellbook);
                     Microbot.log("Has level " + bestThrall.getRequiredLevel() + ": " + hasLevel);
-                    Microbot.log("Has runes: " + hasRunes);
+                    Microbot.log("Has Fire runes: " + hasFireRunes);
+                    Microbot.log("Has Cosmic runes (or Aether): " + hasCosmicRunes);
+                    Microbot.log("Has Blood runes: " + hasBloodRunes);
+                    Microbot.log("All runes: " + hasRunes);
                     
                     if (hasBookOfDead && correctSpellbook && hasLevel && hasRunes) {
                         statusText = "Casting " + bestThrall.getName();
