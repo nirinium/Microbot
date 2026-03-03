@@ -603,6 +603,17 @@ public class TormentedDemonScript extends Script {
             sleep(100, 200);
         }
 
+        // ── Drop target if another player has engaged it ──
+        if (currentTarget != null && !currentTarget.isDead()) {
+            if (isBeingFoughtByOtherPlayer(currentTarget, localPlayer)
+                    && !(currentTarget.getInteracting() == localPlayer)) {
+                logOnce("Demon now fighting another player – switching target.");
+                currentTarget = null;
+                lastKnownHeadIcon = null;
+                return;
+            }
+        }
+
         // ── Attack if not already interacting ──
         if (currentTarget != null && !currentTarget.isDead()) {
             statusText = "Fighting " + TD_NAME;
