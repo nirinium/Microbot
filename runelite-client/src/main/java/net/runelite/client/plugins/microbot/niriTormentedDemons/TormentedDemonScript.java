@@ -971,13 +971,11 @@ public class TormentedDemonScript extends Script {
     // ─── Looting ────────────────────────────────────────────────────────────────
 
     /**
-     * Opportunistically loot smouldering drops during combat for instant restoration.
-     * These drops appear on the ground while fighting and provide immediate effects on pickup:
-     * <ul>
-     *   <li>Smouldering pile of flesh: heals 10 HP (can overheal above max)</li>
-     *   <li>Smouldering gland: restores 10 prayer points</li>
-     *   <li>Smouldering heart: boosts Attack, Strength, Ranged, and Magic by 2</li>
-     * </ul>
+     * Emergency-only smouldering loot during combat.
+     * <p>
+     * Only picks up flesh/gland when stats are critically low (at configured emergency thresholds).
+     * Hearts are never picked up mid-combat — all smouldering items are reliably looted post-combat
+     * in {@link #attemptLooting}. When picking up, spam-clicks for reliability.
      */
     private void lootSmoulderingDropsIfNeeded(TormentedDemonConfig config) {
         int hpPercent = getHpPercent();
@@ -985,42 +983,84 @@ public class TormentedDemonScript extends Script {
         int maxPrayer = Microbot.getClient().getRealSkillLevel(Skill.PRAYER);
         int prayerPercent = maxPrayer > 0 ? (prayer * 100) / maxPrayer : 100;
 
-        // Loot smouldering flesh if HP is at or below threshold (can overheal)
+        // Emergency flesh pickup — only when HP is critically low
         if (config.lootSmoulderingFlesh() && hpPercent <= config.smoulderingFleshHpThreshold()) {
-            if (Rs2GroundItem.exists("Smouldering pile of flesh", 10)) {
-                statusText = "Loot: flesh for healing";
-                if (Rs2GroundItem.loot("Smouldering pile of flesh", 10)) {
-                    logOnce("Picked up smouldering flesh (HP was " + hpPercent + "%)");
-                    sleep(300, 600);
-                }
+            if (Rs2GroundItem.exists("Smouldering pile of flesh", 5)) {
+                statusText = "EMERGENCY: flesh for healing";
+                log.info("Emergency smouldering flesh pickup (HP {}%)", hpPercent);
+                spamClickGroundItem("Smouldering pile of flesh", 5, 3);
             }
         }
 
-        // Loot smouldering gland if prayer is low
+        // Emergency gland pickup — only when prayer is critically low
         if (config.lootSmoulderingGland() && prayerPercent <= config.smoulderingGlandPrayerThreshold()) {
-            if (Rs2GroundItem.exists("Smouldering gland", 10)) {
-                statusText = "Loot: gland for prayer";
-                if (Rs2GroundItem.loot("Smouldering gland", 10)) {
-                    logOnce("Picked up smouldering gland (Prayer was " + prayerPercent + "%)");
-                    sleep(300, 600);
-                }
+            if (Rs2GroundItem.exists("Smouldering gland", 5)) {
+                statusText = "EMERGENCY: gland for prayer";
+                log.info("Emergency smouldering gland pickup (Prayer {}%)", prayerPercent);
+                spamClickGroundItem("Smouldering gland", 5, 3);
             }
         }
 
-        // Loot smouldering heart for combat stat boost
+        // Hearts are NOT picked up mid-combat — looted post-combat in attemptLooting
+    }
+
+    /**
+     * Loot all smouldering drops after combat ends. Called from {@link #attemptLooting}.
+     * This is the preferred time to pick these up — no combat pressure, full reliability.
+     * Spam-clicks for fast reliable pickup.
+     */
+    private void lootSmoulderingDropsPostCombat(TormentedDemonConfig config) {
+        // Flesh — always pick up after combat (overheals, free HP)
+        if (config.lootSmoulderingFlesh()) {
+            if (Rs2GroundItem.exists("Smouldering pile of flesh", 10)) {
+                statusText = "Loot: flesh (post-combat)";
+                spamClickGroundItem("Smouldering pile of flesh", 10, 3);
+            }
+        }
+
+        // Gland — always pick up after combat (free prayer)
+        if (config.lootSmoulderingGland()) {
+            if (Rs2GroundItem.exists("Smouldering gland", 10)) {
+                statusText = "Loot: gland (post-combat)";
+                spamClickGroundItem("Smouldering gland", 10, 3);
+            }
+        }
+
+        // Heart — only picked up post-combat
         if (config.lootSmoulderingHeart()) {
             if (Rs2GroundItem.exists("Smouldering heart", 10)) {
-                statusText = "Loot: heart for stat boost";
-                if (Rs2GroundItem.loot("Smouldering heart", 10)) {
-                    logOnce("Picked up smouldering heart for combat boost");
-                    sleep(300, 600);
-                }
+                statusText = "Loot: heart (post-combat)";
+                spamClickGroundItem("Smouldering heart", 10, 3);
             }
         }
     }
 
+    /**
+     * Spam-click a ground item multiple times for reliable pickup.
+     * Especially effective when the item is close (≤3 tiles) since clicks register faster.
+     *
+     * @param itemName  the ground item name
+     * @param range     search radius in tiles
+     * @param clicks    number of times to click (spam)
+     */
+    private void spamClickGroundItem(String itemName, int range, int clicks) {
+        for (int i = 0; i < clicks; i++) {
+            if (!Rs2GroundItem.exists(itemName, range)) {
+                // Item already picked up
+                break;
+            }
+            Rs2GroundItem.loot(itemName, range);
+            sleep(80, 150);
+        }
+        // Brief wait for the item to actually be consumed
+        sleep(200, 400);
+    }
+
     private void attemptLooting(TormentedDemonConfig config) {
         statusText = "Looting...";
+
+        // Loot smouldering drops first (post-combat — always pick them up)
+        lootSmoulderingDropsPostCombat(config);
 
         // Always loot priority items first, regardless of config
         if (!Rs2Inventory.isFull()) {

@@ -581,7 +581,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "lootSmoulderingFlesh",
             name = "Loot Smouldering Flesh",
-            description = "Automatically loot 'Smouldering pile of flesh' for healing during combat (heals 10 HP, can overheal above max HP)",
+            description = "Loot 'Smouldering pile of flesh' (heals 10 HP, can overheal). During combat: emergency only (at/below HP threshold). After combat: always picked up.",
             section = lootingSection,
             position = 3
     )
@@ -592,19 +592,19 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "smoulderingFleshHpThreshold",
             name = "Flesh HP Threshold %",
-            description = "Loot smouldering flesh when HP is at or below this percentage. Set to 100 to always pick up (overheals)",
+            description = "During combat: only loot flesh at or below this HP %. Keep low for emergency-only. After combat it's always looted regardless.",
             section = lootingSection,
             position = 4
     )
-    @Range(min = 20, max = 100)
+    @Range(min = 10, max = 100)
     default int smoulderingFleshHpThreshold() {
-        return 90;
+        return 40;
     }
 
     @ConfigItem(
             keyName = "lootSmoulderingGland",
             name = "Loot Smouldering Gland",
-            description = "Automatically loot 'Smouldering gland' for prayer restoration during combat (restores 10 prayer)",
+            description = "Loot 'Smouldering gland' (restores 10 prayer). During combat: emergency only (at/below prayer threshold). After combat: always picked up.",
             section = lootingSection,
             position = 5
     )
@@ -615,19 +615,19 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "smoulderingGlandPrayerThreshold",
             name = "Gland Prayer Threshold %",
-            description = "Loot smouldering gland when prayer drops below this percentage",
+            description = "During combat: only loot gland at or below this prayer %. Keep low for emergency-only. After combat it's always looted regardless.",
             section = lootingSection,
             position = 6
     )
     @Range(min = 10, max = 90)
     default int smoulderingGlandPrayerThreshold() {
-        return 50;
+        return 30;
     }
 
     @ConfigItem(
             keyName = "lootSmoulderingHeart",
             name = "Loot Smouldering Heart",
-            description = "Automatically loot 'Smouldering heart' during combat (boosts Attack, Strength, Ranged, Magic by 2)",
+            description = "Loot 'Smouldering heart' (boosts Attack/Str/Range/Magic by 2). Only picked up after combat, never mid-fight.",
             section = lootingSection,
             position = 7
     )

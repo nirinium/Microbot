@@ -731,17 +731,43 @@ public class Rs2InventorySetup {
 
     /**
      * Withdraws an item from the bank.
+     * <p>
+     * For fuzzy items (e.g. potions), we first try to withdraw by the exact item ID from the
+     * setup (e.g. Prayer potion(4) specifically). This prevents the bank from grabbing a random
+     * dose when multiple doses exist. Only falls back to fuzzy name matching if the exact ID
+     * isn't available in the bank.
      *
      * @param item     The item to withdraw.
      * @param quantity The quantity to withdraw.
+     * @param isNoted  Whether the item should be withdrawn as noted.
      */
     private void withdrawItem(InventorySetupsItem item, int quantity,  boolean isNoted) {
-		boolean useName = item.isFuzzy() || isNoted; // when notded we must use the name to withdraw or we must use the unnoted id
-		Object identifier = useName ? item.getName().toLowerCase() : item.getId();
 		boolean isWithdrawAs= Rs2Bank.isWithdrawAs(isNoted);
 		if(!isWithdrawAs){
 			Rs2Bank.setWithdrawAs(isNoted);
 		}
+
+		// For fuzzy items (potions, degradeable gear, etc.), prefer withdrawing by exact ID first.
+		// The item ID corresponds to the specific variant saved in the setup (e.g. 4-dose potion).
+		// Only fall back to fuzzy name matching if the exact ID isn't in the bank.
+		if (item.isFuzzy() && !isNoted) {
+			boolean hasExactId = Rs2Bank.hasBankItem(item.getId(), 1);
+			if (hasExactId) {
+				// Withdraw by exact ID — gets the specific dose/variant from the setup
+				if (quantity > 1) {
+					Rs2Bank.withdrawX(item.getId(), quantity);
+				} else {
+					Rs2Bank.withdrawItem(item.getId());
+				}
+				Rs2Inventory.waitForInventoryChanges(5000);
+				return;
+			}
+			// Exact ID not in bank — fall through to fuzzy name matching below
+		}
+
+		boolean useName = item.isFuzzy() || isNoted; // when noted we must use the name to withdraw or we must use the unnoted id
+		Object identifier = useName ? item.getName().toLowerCase() : item.getId();
+
 		if (quantity > 1) {
 			if (useName) {
 				Rs2Bank.withdrawX((String) identifier, quantity);
