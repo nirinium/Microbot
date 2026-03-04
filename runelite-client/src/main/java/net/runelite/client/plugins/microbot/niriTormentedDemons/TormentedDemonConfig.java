@@ -155,11 +155,81 @@ public interface TormentedDemonConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "bankingSetup",
-            name = "Banking Setup",
-            description = "Inventory Setups preset loaded at bank (should contain all switch gear, food, pots)",
+            keyName = "baseGear",
+            name = "Base Gear (Always Worn)",
+            description = "Comma-separated item names for gear worn at all times (e.g. Torva full helm,Torva platebody,Avernic defender). Leave switch-only items in the style-specific fields above.",
             section = gearSection,
             position = 6
+    )
+    default String baseGear() {
+        return "";
+    }
+
+    @ConfigItem(
+            keyName = "foodName",
+            name = "Food Item",
+            description = "Name of food to withdraw (e.g. Shark, Manta ray, Anglerfish)",
+            section = gearSection,
+            position = 7
+    )
+    default String foodName() {
+        return "Shark";
+    }
+
+    @ConfigItem(
+            keyName = "foodQuantity",
+            name = "Food Quantity",
+            description = "Number of food items to withdraw from bank",
+            section = gearSection,
+            position = 8
+    )
+    @Range(min = 0, max = 28)
+    default int foodQuantity() {
+        return 10;
+    }
+
+    @ConfigItem(
+            keyName = "prayerPotionQuantity",
+            name = "Prayer Potion Quantity",
+            description = "Number of prayer potions (any dose) to withdraw",
+            section = gearSection,
+            position = 9
+    )
+    @Range(min = 0, max = 10)
+    default int prayerPotionQuantity() {
+        return 3;
+    }
+
+    @ConfigItem(
+            keyName = "combatPotionQuantity",
+            name = "Combat Potion Quantity",
+            description = "Number of combat potions to withdraw (only if using melee)",
+            section = gearSection,
+            position = 10
+    )
+    @Range(min = 0, max = 5)
+    default int combatPotionQuantity() {
+        return 1;
+    }
+
+    @ConfigItem(
+            keyName = "rangingPotionQuantity",
+            name = "Ranging Potion Quantity",
+            description = "Number of ranging potions to withdraw (only if using ranged)",
+            section = gearSection,
+            position = 11
+    )
+    @Range(min = 0, max = 5)
+    default int rangingPotionQuantity() {
+        return 1;
+    }
+
+    @ConfigItem(
+            keyName = "bankingSetup",
+            name = "Banking Setup",
+            description = "Select an Inventory Setup to load at the bank. Create one in the Inventory Setups plugin first.",
+            section = gearSection,
+            position = 1
     )
     default InventorySetup bankingSetup() {
         return null;

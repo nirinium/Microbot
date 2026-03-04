@@ -39,6 +39,7 @@ import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 import net.runelite.api.widgets.Widget;
+import org.slf4j.event.Level;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -202,13 +203,6 @@ public class TormentedDemonScript extends Script {
     // ─── Banking ────────────────────────────────────────────────────────────────
 
     private void handleBanking(TormentedDemonConfig config) {
-        InventorySetup bankSetup = config.bankingSetup();
-        if (bankSetup == null) {
-            logOnce("No banking setup selected! Configure a banking inventory setup.");
-            shutdown();
-            return;
-        }
-
         // ── Smart location detection: route to the correct bank step based on where we actually are ──
         if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX) {
             // If we're at the GE already (not in POH), skip straight to banking there
@@ -314,14 +308,33 @@ public class TormentedDemonScript extends Script {
                     bankStep = BankStep.OPEN_BANK;
                     break;
                 }
-                Rs2InventorySetup setup = new Rs2InventorySetup(bankSetup, mainScheduledFuture);
-                boolean equipOk = setup.loadEquipment();
-                // Reset pause flag between calls so loadInventory isn't affected by loadEquipment failure
-                Microbot.pauseAllScripts.set(false);
-                boolean invOk = setup.loadInventory();
+                
+                // Use Rs2InventorySetup like Vorkath/Sire
+                InventorySetup setup = config.bankingSetup();
+                if (setup == null) {
+                    Microbot.log("No inventory setup selected — stopping", Level.WARN);
+                    Microbot.showMessage("Tormented Demons: Select an Inventory Setup in the Gear section!");
+                    shutdown();
+                    return;
+                }
+                
+                Rs2InventorySetup inventorySetup = new Rs2InventorySetup(setup, mainScheduledFuture);
+                
+                boolean hasEquipment = inventorySetup.doesEquipmentMatch();
+                if (!hasEquipment) {
+                    hasEquipment = inventorySetup.loadEquipment();
+                    sleep(600);
+                }
+                
+                boolean hasInventory = inventorySetup.doesInventoryMatch();
+                if (!hasInventory && inventorySetup.doesEquipmentMatch()) {
+                    hasInventory = inventorySetup.loadInventory();
+                    sleep(600);
+                }
+                
                 Microbot.pauseAllScripts.set(false);
 
-                if (equipOk && invOk) {
+                if (hasEquipment && hasInventory) {
                     Rs2Bank.closeBank();
                     sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
                     bankStep = BankStep.TRAVEL_TO_FEROX;
@@ -440,14 +453,33 @@ public class TormentedDemonScript extends Script {
                     bankStep = BankStep.GE_OPEN_BANK;
                     break;
                 }
-                Rs2InventorySetup geSetup = new Rs2InventorySetup(bankSetup, mainScheduledFuture);
-                boolean geEquipOk = geSetup.loadEquipment();
-                // Reset pause flag between calls so loadInventory isn't affected by loadEquipment failure
-                Microbot.pauseAllScripts.set(false);
-                boolean geInvOk = geSetup.loadInventory();
+                
+                // Use Rs2InventorySetup like Vorkath/Sire
+                InventorySetup geSetup = config.bankingSetup();
+                if (geSetup == null) {
+                    Microbot.log("No inventory setup selected — stopping", Level.WARN);
+                    Microbot.showMessage("Tormented Demons: Select an Inventory Setup in the Gear section!");
+                    shutdown();
+                    return;
+                }
+                
+                Rs2InventorySetup geInventorySetup = new Rs2InventorySetup(geSetup, mainScheduledFuture);
+                
+                boolean geHasEquipment = geInventorySetup.doesEquipmentMatch();
+                if (!geHasEquipment) {
+                    geHasEquipment = geInventorySetup.loadEquipment();
+                    sleep(600);
+                }
+                
+                boolean geHasInventory = geInventorySetup.doesInventoryMatch();
+                if (!geHasInventory && geInventorySetup.doesEquipmentMatch()) {
+                    geHasInventory = geInventorySetup.loadInventory();
+                    sleep(600);
+                }
+                
                 Microbot.pauseAllScripts.set(false);
 
-                if (geEquipOk && geInvOk) {
+                if (geHasEquipment && geHasInventory) {
                     Rs2Bank.closeBank();
                     sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
                     bankStep = BankStep.POH_RESTORE;
@@ -1536,6 +1568,12 @@ public class TormentedDemonScript extends Script {
         // Check for Saradomin brews or other healing potions
         return Rs2Inventory.contains("Saradomin brew");
     }
+
+    /**
+     * Manually loads gear and supplies from bank based on config fields.
+     * Returns true if successful, false if missing items.
+     */
+
 
     @Override
     public void shutdown() {
