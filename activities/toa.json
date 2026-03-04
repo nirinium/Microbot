@@ -1,0 +1,49 @@
+{
+  "name": "Tombs of Amascut",
+  "aliases": ["toa", "tombs", "amascut"],
+  "wikiUrl": "https://oldschool.runescape.wiki/w/Tombs_of_Amascut/Strategies",
+  "notes": "Expert mode melee with ranged and magic switches. Lightbearer is priority for special attack restoration.",
+
+  "equipment": {
+    "HEAD":   { "items": [["Neitiznot faceguard"], ["Helm of neitiznot"], ["Berserker helm"]] },
+    "CAPE":   { "items": [["Infernal cape"], ["Fire cape"], ["Mythical cape"]] },
+    "AMULET": { "items": [["Amulet of rancour"], ["Amulet of torture"], ["Amulet of fury (or)"], ["Amulet of fury"]] },
+    "WEAPON": { "wield": true, "items": [["Osmumten's fang"], ["Abyssal tentacle"], ["Abyssal whip"]] },
+    "BODY":   { "items": [["Inquisitor's hauberk"], ["Bandos chestplate"], ["Fighter torso"]] },
+    "SHIELD": { "wield": true, "items": [["Avernic defender"], ["Dragon defender"], ["Dragonfire shield"]] },
+    "LEGS":   { "items": [["Inquisitor's plateskirt"], ["Bandos tassets"], ["Obsidian platelegs"]] },
+    "GLOVES": { "items": [["Ferocious gloves"], ["Barrows gloves"]] },
+    "BOOTS":  { "items": [["Dragon boots"], ["Primordial boots"], ["Rune boots"]] },
+    "RING":   { "items": [["Lightbearer"], ["Berserker ring (i)"], ["Berserker ring"]] }
+  },
+
+  "inventory": [
+    { "slot": 0,  "items": ["Masori body (f)", "Masori body", "Armadyl chestplate"],                    "type": "switch" },
+    { "slot": 1,  "items": ["Twisted bow", "Bow of faerdhinen (c)", "Bow of faerdhinen", "Zaryte bow"], "type": "switch" },
+    { "slot": 2,  "items": ["Echo virtus robe top", "Ancestral robe top", "Ahrim's robetop"],           "type": "switch" },
+    { "slot": 3,  "items": ["Masori chaps (f)", "Masori chaps", "Armadyl chainskirt"],                  "type": "switch" },
+    { "slot": 4,  "items": ["Masori mask (f)", "Masori mask", "Armadyl helmet"],                        "type": "switch" },
+    { "slot": 5,  "items": ["Echo virtus robe bottom", "Ancestral robe bottom", "Ahrim's robeskirt"],   "type": "switch" },
+    { "slot": 6,  "items": ["Imbued zamorak cape", "Imbued guthix cape", "Imbued saradomin cape"],      "type": "switch" },
+    { "slot": 7,  "items": ["Necklace of anguish (or)", "Necklace of anguish"],                         "type": "switch" },
+    { "slot": 9,  "items": ["Occult necklace (or)", "Occult necklace"],                                 "type": "switch" },
+    { "slot": 10, "items": ["Tormented bracelet (or)", "Tormented bracelet"],                           "type": "switch" },
+    { "slot": 11, "name":  "Bandos godsword",                                                           "type": "switch" },
+    { "slot": 12, "items": ["Ava's assembler", "Ava's accumulator", "Ava's attractor"],                 "type": "switch" },
+    { "slot": 13, "name":  "Eye of ayak",                                                               "type": "switch" },
+    { "slot": 14, "name":  "Keris partisan of the sun",                                                 "type": "switch" },
+    { "slot": 15, "name": "Divine super combat potion(4)", "type": "supply"  },
+    { "slot": 16, "name": "Divine ranging potion(4)",      "type": "supply"  },
+    { "slot": 17, "name": "Antidote++(4)",                 "type": "supply"  },
+    { "slot": 18, "name": "Antidote++(4)",                 "type": "supply"  },
+    { "slot": 19, "name": "Super restore(4)",              "type": "supply"  },
+    { "slot": 20, "name": "Super restore(4)",              "type": "supply"  },
+    { "slot": 21, "name": "Cooked karambwan",              "type": "supply"  },
+    { "slot": 22, "name": "Cooked karambwan",              "type": "supply"  },
+    { "slot": 23, "name": "Cooked karambwan",              "type": "supply"  },
+    { "slot": 24, "name": "Cooked karambwan",              "type": "supply"  },
+    { "slot": 25, "name": "Book of the dead",              "type": "switch"  },
+    { "slot": 26, "name": "Rune pouch",                    "type": "keep"    },
+    { "slot": 27, "name": "Teleport to house",             "type": "supply"  }
+  ]
+}
