@@ -117,6 +117,8 @@ public class TormentedDemonScript extends Script {
     private TravelStep travelStep = TravelStep.TELEPORT;
     private boolean hasLooted = false;
     private String lastLogMessage = "";
+    private int bankLoadAttempts = 0;
+    private static final int MAX_BANK_LOAD_ATTEMPTS = 3;
 
     // Spec & punish tracking
     private volatile long shieldBrokenTick = 0;
@@ -145,14 +147,31 @@ public class TormentedDemonScript extends Script {
         if (config.mode() == TormentedDemonConfig.Mode.COMBAT_ONLY) {
             botState = BotState.FIGHTING;
         } else {
-            botState = BotState.BANKING;
+            // If already near the demons, start fighting immediately
+            if (playerLocation().distanceTo(TD_FIGHT_AREA) <= 15) {
+                botState = BotState.FIGHTING;
+            } else {
+                botState = BotState.BANKING;
+            }
         }
 
-        // Set initial bank step based on banking method
+        // Set initial bank step based on banking method and current location
         if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX) {
-            bankStep = BankStep.POH_RESTORE;
+            if (PohTeleports.isInHouse()) {
+                bankStep = BankStep.POH_RESTORE;
+            } else if (playerLocation().distanceTo(GE_AREA) <= 30) {
+                bankStep = BankStep.GE_OPEN_BANK;
+            } else if (Rs2Bank.isNearBank(20)) {
+                bankStep = BankStep.GE_OPEN_BANK;
+            } else {
+                bankStep = BankStep.POH_RESTORE;
+            }
         } else {
-            bankStep = BankStep.RESTORE;
+            if (playerLocation().distanceTo(FEROX_AREA) <= 20) {
+                bankStep = BankStep.RESTORE;
+            } else {
+                bankStep = BankStep.TRAVEL_TO_FEROX;
+            }
         }
         travelStep = TravelStep.TELEPORT;
 
@@ -188,6 +207,36 @@ public class TormentedDemonScript extends Script {
             logOnce("No banking setup selected! Configure a banking inventory setup.");
             shutdown();
             return;
+        }
+
+        // ── Smart location detection: route to the correct bank step based on where we actually are ──
+        if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX) {
+            // If we're at the GE already (not in POH), skip straight to banking there
+            if (!PohTeleports.isInHouse() && playerLocation().distanceTo(GE_AREA) <= 30
+                    && bankStep != BankStep.GE_OPEN_BANK && bankStep != BankStep.GE_LOAD_SETUP) {
+                logOnce("Already at GE — skipping to bank.");
+                bankStep = BankStep.GE_OPEN_BANK;
+            }
+            // If we're not in POH and not at GE, we need to get to POH first
+            // but only if we're stuck on a POH step
+            if (!PohTeleports.isInHouse() && playerLocation().distanceTo(GE_AREA) > 30
+                    && (bankStep == BankStep.POH_RESTORE || bankStep == BankStep.POH_JEWELLERY_BOX)) {
+                // Check if we have a teleport item to get to POH
+                String teleItem = config.teleportItem();
+                if (teleItem.isEmpty() || !Rs2Inventory.hasItem(teleItem)) {
+                    // Can't get to POH — try to find a bank nearby instead
+                    if (Rs2Bank.isNearBank(20)) {
+                        logOnce("Can't reach POH — using nearby bank instead.");
+                        bankStep = BankStep.GE_OPEN_BANK;
+                    }
+                }
+            }
+        } else {
+            // Ferox method: if we're already near Ferox, skip the travel step
+            if (playerLocation().distanceTo(FEROX_AREA) <= 20
+                    && bankStep == BankStep.TRAVEL_TO_FEROX) {
+                bankStep = BankStep.RESTORE;
+            }
         }
 
         switch (bankStep) {
@@ -239,8 +288,12 @@ public class TormentedDemonScript extends Script {
             case OPEN_BANK:
                 statusText = "Opening bank...";
                 if (Rs2Bank.isOpen()) {
+                    // Deposit BOTH inventory and equipment so everything is in the bank
+                    // before loadEquipment/loadInventory try to find items
                     Rs2Bank.depositAll();
-                    sleep(300, 500);
+                    Rs2Bank.depositEquipment();
+                    sleepUntil(Rs2Inventory::isEmpty, 3000);
+                    sleep(1200, 1800); // generous wait for bank cache to update
                     bankStep = BankStep.LOAD_SETUP;
                 } else {
                     if (!Rs2Bank.isNearBank(15)) {
@@ -263,17 +316,32 @@ public class TormentedDemonScript extends Script {
                 }
                 Rs2InventorySetup setup = new Rs2InventorySetup(bankSetup, mainScheduledFuture);
                 boolean equipOk = setup.loadEquipment();
+                // Reset pause flag between calls so loadInventory isn't affected by loadEquipment failure
+                Microbot.pauseAllScripts.set(false);
                 boolean invOk = setup.loadInventory();
+                Microbot.pauseAllScripts.set(false);
 
                 if (equipOk && invOk) {
                     Rs2Bank.closeBank();
                     sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
                     bankStep = BankStep.TRAVEL_TO_FEROX;
                     botState = BotState.TRAVELLING;
+                    bankLoadAttempts = 0;
                     logOnce("Banking complete, heading to demons.");
                 } else {
-                    logOnce("Failed to load setup — missing items? Shutting down.");
-                    shutdown();
+                    bankLoadAttempts++;
+                    if (bankLoadAttempts >= MAX_BANK_LOAD_ATTEMPTS) {
+                        logOnce("Failed to load setup after " + MAX_BANK_LOAD_ATTEMPTS + " attempts — missing items? Shutting down.");
+                        bankLoadAttempts = 0;
+                        shutdown();
+                    } else {
+                        logOnce("Bank load attempt " + bankLoadAttempts + "/" + MAX_BANK_LOAD_ATTEMPTS + " failed — retrying...");
+                        // Close and reopen bank to refresh bank cache
+                        Rs2Bank.closeBank();
+                        sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
+                        sleep(600, 1000);
+                        bankStep = BankStep.OPEN_BANK;
+                    }
                 }
                 break;
 
@@ -281,13 +349,33 @@ public class TormentedDemonScript extends Script {
             case POH_RESTORE:
                 statusText = "Restoring at POH pool...";
                 if (!PohTeleports.isInHouse()) {
-                    // We should be in our house; if not, something went wrong
-                    logOnce("Not in POH — retrying teleport to house...");
-                    if (Rs2Inventory.interact(config.teleportItem(), "break")
-                            || Rs2Inventory.interact(config.teleportItem(), "teleport")
-                            || Rs2Inventory.interact(config.teleportItem(), "rub")) {
+                    // Check if we're already near a bank — skip POH and bank directly
+                    if (Rs2Bank.isNearBank(20)) {
+                        logOnce("Near a bank — skipping POH, banking directly.");
+                        bankStep = BankStep.GE_OPEN_BANK;
+                        break;
+                    }
+                    // Try to teleport to POH
+                    String pohTeleItem = config.teleportItem();
+                    if (pohTeleItem.isEmpty() || !Rs2Inventory.hasItem(pohTeleItem)) {
+                        logOnce("No teleport to house item — walking to nearest bank.");
+                        Rs2Bank.walkToBank();
+                        sleepUntil(() -> Rs2Bank.isNearBank(15), 10000);
+                        bankStep = BankStep.GE_OPEN_BANK;
+                        break;
+                    }
+                    logOnce("Not in POH — teleporting to house...");
+                    if (Rs2Inventory.interact(pohTeleItem, "break")
+                            || Rs2Inventory.interact(pohTeleItem, "teleport")
+                            || Rs2Inventory.interact(pohTeleItem, "rub")) {
                         Rs2Player.waitForAnimation();
                         sleepUntil(PohTeleports::isInHouse, 6000);
+                    }
+                    if (!PohTeleports.isInHouse()) {
+                        logOnce("Failed to reach POH — walking to nearest bank.");
+                        Rs2Bank.walkToBank();
+                        sleepUntil(() -> Rs2Bank.isNearBank(15), 10000);
+                        bankStep = BankStep.GE_OPEN_BANK;
                     }
                     break;
                 }
@@ -329,8 +417,11 @@ public class TormentedDemonScript extends Script {
             case GE_OPEN_BANK:
                 statusText = "Opening bank at GE...";
                 if (Rs2Bank.isOpen()) {
+                    // Deposit BOTH inventory and equipment so everything is in the bank
                     Rs2Bank.depositAll();
-                    sleep(300, 500);
+                    Rs2Bank.depositEquipment();
+                    sleepUntil(Rs2Inventory::isEmpty, 3000);
+                    sleep(1200, 1800); // generous wait for bank cache to update
                     bankStep = BankStep.GE_LOAD_SETUP;
                 } else {
                     if (!Rs2Bank.isNearBank(15)) {
@@ -351,17 +442,32 @@ public class TormentedDemonScript extends Script {
                 }
                 Rs2InventorySetup geSetup = new Rs2InventorySetup(bankSetup, mainScheduledFuture);
                 boolean geEquipOk = geSetup.loadEquipment();
+                // Reset pause flag between calls so loadInventory isn't affected by loadEquipment failure
+                Microbot.pauseAllScripts.set(false);
                 boolean geInvOk = geSetup.loadInventory();
+                Microbot.pauseAllScripts.set(false);
 
                 if (geEquipOk && geInvOk) {
                     Rs2Bank.closeBank();
                     sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
                     bankStep = BankStep.POH_RESTORE;
                     botState = BotState.TRAVELLING;
+                    bankLoadAttempts = 0;
                     logOnce("Banking complete, heading to demons.");
                 } else {
-                    logOnce("Failed to load setup — missing items? Shutting down.");
-                    shutdown();
+                    bankLoadAttempts++;
+                    if (bankLoadAttempts >= MAX_BANK_LOAD_ATTEMPTS) {
+                        logOnce("Failed to load setup after " + MAX_BANK_LOAD_ATTEMPTS + " attempts — missing items? Shutting down.");
+                        bankLoadAttempts = 0;
+                        shutdown();
+                    } else {
+                        logOnce("Bank load attempt " + bankLoadAttempts + "/" + MAX_BANK_LOAD_ATTEMPTS + " failed — retrying...");
+                        // Close and reopen bank to refresh bank cache
+                        Rs2Bank.closeBank();
+                        sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
+                        sleep(600, 1000);
+                        bankStep = BankStep.GE_OPEN_BANK;
+                    }
                 }
                 break;
         }
@@ -373,6 +479,14 @@ public class TormentedDemonScript extends Script {
         if (Rs2Bank.isOpen()) {
             Rs2Bank.closeBank();
             sleep(300);
+            return;
+        }
+
+        // If already near demons, skip straight to fighting
+        if (playerLocation().distanceTo(TD_FIGHT_AREA) <= 15) {
+            travelStep = TravelStep.TELEPORT;
+            botState = BotState.FIGHTING;
+            logOnce("Already near demons — starting combat.");
             return;
         }
 
@@ -576,6 +690,7 @@ public class TormentedDemonScript extends Script {
         if (currentTarget == null || currentTarget.isDead()) {
             statusText = "Finding target...";
             hasLooted = false;
+            shieldBrokenTick = 0; // reset shield state for new target
             currentTarget = findBestTarget(config);
             if (currentTarget == null) {
                 statusText = "No targets available.";
@@ -1276,13 +1391,16 @@ public class TormentedDemonScript extends Script {
 
     /**
      * Equip the configured punish weapon (Dharok's greataxe), attack the current target
-     * for a single hit, then switch back to normal melee gear.
+     * for a single hit, then switch back to the gear for the currently active combat style.
      * Should only be called while the demon's fire shield is down.
      */
     private void performDharokPunish(TormentedDemonConfig config) {
         String punishWeapon = config.punishWeaponName();
         if (punishWeapon == null || punishWeapon.trim().isEmpty()) return;
         if (!Rs2Inventory.hasItem(punishWeapon) && !Rs2Equipment.isWearing(punishWeapon)) return;
+
+        // Remember which style we were using so we can switch back
+        CombatStyle previousStyle = activeCombatStyle;
 
         statusText = "Punish: " + punishWeapon;
 
@@ -1303,9 +1421,12 @@ public class TormentedDemonScript extends Script {
             sleep(600, 800);
         }
 
-        // Switch back to normal melee gear
-        equipGearFromString(config.meleeGear(), config.gearSwitchDelay());
-        logOnce("Punish hit with " + punishWeapon);
+        // Switch back to the gear we were using before the punish
+        String switchBackGear = previousStyle != null
+                ? getGearStringForStyle(config, previousStyle)
+                : config.meleeGear();
+        equipGearFromString(switchBackGear, config.gearSwitchDelay());
+        logOnce("Punish hit with " + punishWeapon + " (returning to " + previousStyle + ")");
     }
 
     // ─── Death Charge ────────────────────────────────────────────────────────────
@@ -1380,18 +1501,20 @@ public class TormentedDemonScript extends Script {
             }
             Rs2Player.waitForAnimation();
             sleepUntil(() -> !Microbot.getClient().isInInstancedRegion(), 5000);
-            // After teleport, stop the script or return to banking
+            sleep(600, 1000); // wait for world to load after teleport
+            // After teleport, return to banking — smart location detection in handleBanking
+            // will route to the correct step based on where we ended up
             if (config.mode() == TormentedDemonConfig.Mode.FULL_AUTO) {
                 botState = BotState.BANKING;
-                // If emergency TP goes to house and we're using POH method, start POH flow
-                if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX
-                        && PohTeleports.isInHouse()) {
+                if (PohTeleports.isInHouse()) {
                     bankStep = BankStep.POH_RESTORE;
-                } else if (PohTeleports.isInHouse()) {
-                    // Emergency TP'd to house but using Ferox banking — exit house first
-                    bankStep = BankStep.TRAVEL_TO_FEROX;
-                } else {
+                } else if (config.bankingMethod() == BankingMethod.POH_JEWELLERY_BOX) {
+                    // Let handleBanking's smart detection figure out the right step
+                    bankStep = BankStep.POH_RESTORE;
+                } else if (playerLocation().distanceTo(FEROX_AREA) <= 20) {
                     bankStep = BankStep.RESTORE;
+                } else {
+                    bankStep = BankStep.TRAVEL_TO_FEROX;
                 }
             }
         } else {
@@ -1429,6 +1552,7 @@ public class TormentedDemonScript extends Script {
         shieldBrokenTick = 0;
         lastPunishTick = 0;
         lastSpecTick = 0;
+        bankLoadAttempts = 0;
         statusText = "Stopped.";
     }
 }
