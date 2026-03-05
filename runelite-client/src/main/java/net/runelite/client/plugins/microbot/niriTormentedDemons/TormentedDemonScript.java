@@ -664,6 +664,9 @@ public class TormentedDemonScript extends Script {
         // ── Loot smouldering drops for emergency healing/prayer ──
         lootSmoulderingDropsIfNeeded(config);
 
+        // ── Opportunistic loot during combat (if enabled and items are nearby) ──
+        lootDuringCombatIfEnabled(config);
+
         // ── Emergency teleport check (highest priority) ──
         if (config.enableEmergencyTeleport()) {
             int hpPercent = getHpPercent();
@@ -787,7 +790,8 @@ public class TormentedDemonScript extends Script {
         }
 
         // ── Thralls (cast before weapon swaps to avoid early returns) ──
-        if (config.useThralls() && !Rs2Thrall.isActive()) {
+        if (config.useThralls() && !Rs2Thrall.isActive()
+                && Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) > 0) {
             ThrallType wantedType = config.thrallType();
             // Search in reverse declaration order so we try Greater → Superior → Lesser
             Rs2Thrall bestThrall = null;
@@ -1135,7 +1139,7 @@ public class TormentedDemonScript extends Script {
             if (Rs2GroundItem.exists("Smouldering pile of flesh", 5)) {
                 statusText = "EMERGENCY: flesh for healing";
                 log.info("Emergency smouldering flesh pickup (HP {}%)", hpPercent);
-                spamClickGroundItem("Smouldering pile of flesh", 5, 3);
+                spamClickGroundItem("Smouldering pile of flesh", 5, 3, "Eat-from");
             }
         }
 
@@ -1144,11 +1148,48 @@ public class TormentedDemonScript extends Script {
             if (Rs2GroundItem.exists("Smouldering gland", 5)) {
                 statusText = "EMERGENCY: gland for prayer";
                 log.info("Emergency smouldering gland pickup (Prayer {}%)", prayerPercent);
-                spamClickGroundItem("Smouldering gland", 5, 3);
+                spamClickGroundItem("Smouldering gland", 5, 3, "Crush");
             }
         }
 
         // Hearts are NOT picked up mid-combat — looted post-combat in attemptLooting
+    }
+
+    /**
+     * Opportunistically loot nearby ground items during combat.
+     * Only triggers when the toggle is on and items are within the configured range.
+     * Skips if inventory is full. Uses configured loot names + always-loot list.
+     */
+    private void lootDuringCombatIfEnabled(TormentedDemonConfig config) {
+        if (!config.lootDuringCombat()) return;
+        if (Rs2Inventory.isFull()) return;
+
+        int range = config.lootDuringCombatRange();
+
+        // Build combined loot list (always-loot + user configured)
+        List<String> names = parseLootNames(config.lootItems());
+        for (String alwaysItem : ALWAYS_LOOT) {
+            if (names.stream().noneMatch(n -> n.equalsIgnoreCase(alwaysItem))) {
+                names.add(alwaysItem);
+            }
+        }
+
+        if (!names.isEmpty()) {
+            for (String itemName : names) {
+                if (Rs2GroundItem.exists(itemName, range)) {
+                    statusText = "Combat loot: " + itemName;
+                    log.info("Looting {} during combat (within {} tiles)", itemName, range);
+                    Rs2GroundItem.loot(itemName, range);
+                    sleep(300, 600);
+                    break; // Only loot one item per tick cycle to stay responsive
+                }
+            }
+        }
+
+        // Also loot items above min value threshold if within range
+        if (config.minLootValue() > 0) {
+            Rs2GroundItem.lootItemBasedOnValue(config.minLootValue(), range);
+        }
     }
 
     /**
@@ -1157,46 +1198,59 @@ public class TormentedDemonScript extends Script {
      * Spam-clicks for fast reliable pickup.
      */
     private void lootSmoulderingDropsPostCombat(TormentedDemonConfig config) {
-        // Flesh — always pick up after combat (overheals, free HP)
+        // Flesh — always eat after combat (overheals, free HP)
         if (config.lootSmoulderingFlesh()) {
             if (Rs2GroundItem.exists("Smouldering pile of flesh", 10)) {
                 statusText = "Loot: flesh (post-combat)";
-                spamClickGroundItem("Smouldering pile of flesh", 10, 3);
+                spamClickGroundItem("Smouldering pile of flesh", 10, 3, "Eat-from");
             }
         }
 
-        // Gland — always pick up after combat (free prayer)
+        // Gland — always crush after combat (free prayer)
         if (config.lootSmoulderingGland()) {
             if (Rs2GroundItem.exists("Smouldering gland", 10)) {
                 statusText = "Loot: gland (post-combat)";
-                spamClickGroundItem("Smouldering gland", 10, 3);
+                spamClickGroundItem("Smouldering gland", 10, 3, "Crush");
             }
         }
 
-        // Heart — only picked up post-combat
+        // Heart — crush post-combat
         if (config.lootSmoulderingHeart()) {
             if (Rs2GroundItem.exists("Smouldering heart", 10)) {
                 statusText = "Loot: heart (post-combat)";
-                spamClickGroundItem("Smouldering heart", 10, 3);
+                spamClickGroundItem("Smouldering heart", 10, 3, "Crush");
             }
         }
     }
 
     /**
      * Spam-click a ground item multiple times for reliable pickup.
-     * Especially effective when the item is close (≤3 tiles) since clicks register faster.
+     * Uses "Take" as the default action.
      *
      * @param itemName  the ground item name
      * @param range     search radius in tiles
      * @param clicks    number of times to click (spam)
      */
     private void spamClickGroundItem(String itemName, int range, int clicks) {
+        spamClickGroundItem(itemName, range, clicks, "Take");
+    }
+
+    /**
+     * Spam-click a ground item multiple times for reliable interaction.
+     * Especially effective when the item is close (≤3 tiles) since clicks register faster.
+     *
+     * @param itemName  the ground item name
+     * @param range     search radius in tiles
+     * @param clicks    number of times to click (spam)
+     * @param action    the right-click action to use (e.g. "Take", "Eat-from", "Crush")
+     */
+    private void spamClickGroundItem(String itemName, int range, int clicks, String action) {
         for (int i = 0; i < clicks; i++) {
             if (!Rs2GroundItem.exists(itemName, range)) {
-                // Item already picked up
+                // Item already picked up / consumed
                 break;
             }
-            Rs2GroundItem.loot(itemName, range);
+            Rs2GroundItem.interact(itemName, action, range);
             sleep(80, 150);
         }
         // Brief wait for the item to actually be consumed

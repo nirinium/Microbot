@@ -1,0 +1,53 @@
+Slot,ItemID,Item
+Head,33068,Hooded Slayer Helmet (i)
+Cape,21795,Imbued Zamorak Cape
+Amulet,19720,Occult Necklace (or)
+Weapon,29594,Purging Staff
+Body,30439,Echo Virtus Robe Top
+Shield,25985,Elidinis Ward
+Legs,30441,Echo Virtus Robe Bottom
+Gloves,23444,Tormented Bracelet (or)
+Boots,31097,Avernic Treads Max
+Ring,28307,Ultor Ring
+Ammo,21326,Amethyst Arrow (x2668)
+
+Slot,ItemID,Item,Qty
+0,29589,Emberlight,1
+1,30756,Oathplate Legs,1
+2,6570,Fire Cape,1
+3,22981,Ferocious Gloves,1
+4,30753,Oathplate Chest,1
+5,24780,Amulet of Blood Fury,1
+6,22322,Avernic Defender,1
+7,27641,Saturated Heart,1
+8,23685,Divine Super Combat Potion(4),1
+9,2434,Prayer Potion(4),1
+10,29577,Burning Claws,1
+11,4887,Dharoks Greataxe (75),1
+12,2434,Prayer Potion(4),1
+13,2434,Prayer Potion(4),1
+14,13441,Anglerfish,1
+15,13441,Anglerfish,1
+16,2434,Prayer Potion(4),1
+17,2434,Prayer Potion(4),1
+18,13441,Anglerfish,1
+19,13441,Anglerfish,1
+20,2434,Prayer Potion(4),1
+21,2434,Prayer Potion(4),1
+22,13441,Anglerfish,1
+23,554,Fire Rune,58741
+24,29684,Guthixian Temple Teleport,1
+25,25818,Book of the Dead,1
+26,12791,Rune Pouch,1
+27,8013,Teleport to House,63
+
+Rune,ItemID,Qty
+Blood Rune,565,14295
+Aether Rune,30843,14210
+Death Rune,560,15879
+
+Emberlight,Fire Cape,Oathplate Chest,Oathplate Legs,Ferocious Gloves,Avernic Defender,Amulet of Blood Fury
+Burning Claws,Dharoks Greataxe (75)
+Purging Staff,Imbued Zamorak Cape,Occult Necklace (or),Echo Virtus Robe Top,Echo Virtus Robe Bottom,Elidinis Ward,Tormented Bracelet (or),Avernic Treads Max
+Hooded Slayer Helmet (i),Ultor Ring
+Divine Super Combat Potion(4) x1,Saturated Heart x1,Prayer Potion(4) x7,Anglerfish x5,Fire Rune x58741,Teleport to House x63,Guthixian Temple Teleport x1,Book of the Dead x1,Rune Pouch (Blood/Aether/Death)

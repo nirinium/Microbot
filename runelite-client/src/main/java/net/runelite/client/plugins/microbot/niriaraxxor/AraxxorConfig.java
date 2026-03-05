@@ -145,10 +145,23 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "mirrorbackSafeDistance",
+            name = "Mirrorback safe distance",
+            description = "Cardinal tile distance to maintain from mirrorback araxytes when attacking. " +
+                    "Use 2 for halberd (1 tile gap avoids reflected damage). Use 1 for melee weapons.",
+            position = 9,
+            section = combatSection
+    )
+    @Range(min = 1, max = 3)
+    default int mirrorbackSafeDistance() {
+        return 2;
+    }
+
+    @ConfigItem(
             keyName = "useThralls",
             name = "Use Thralls",
             description = "Summon a thrall using the Arceuus spellbook (requires Book of the Dead and runes)",
-            position = 9,
+            position = 10,
             section = combatSection
     )
     default boolean useThralls() {
@@ -159,7 +172,7 @@ public interface AraxxorConfig extends Config {
             keyName = "thrallType",
             name = "Thrall type",
             description = "Which type of thrall to summon (Magic = ghost, Ranged = skeleton, Melee = zombie)",
-            position = 10,
+            position = 11,
             section = combatSection
     )
     default ThrallType thrallType() {

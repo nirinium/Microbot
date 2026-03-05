@@ -185,6 +185,8 @@ public class AraxxorPlugin extends Plugin {
                 log.debug("Araxxor shouted Skree! — cleave incoming");
                 script.setCleaveIncoming(true);
                 script.computeCleaveTiles();
+                // Issue dodge walk on the SAME game tick for fastest possible reaction
+                script.precomputeAndDodgeCleave();
             }
         }
     }

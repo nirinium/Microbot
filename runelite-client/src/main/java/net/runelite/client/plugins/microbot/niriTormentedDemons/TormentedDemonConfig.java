@@ -649,11 +649,34 @@ public interface TormentedDemonConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "lootDuringCombat",
+            name = "Loot During Combat",
+            description = "Opportunistically loot nearby ground items while fighting (only if within range)",
+            section = lootingSection,
+            position = 3
+    )
+    default boolean lootDuringCombat() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "lootDuringCombatRange",
+            name = "Combat Loot Range",
+            description = "Maximum tile distance to loot items during combat",
+            section = lootingSection,
+            position = 4
+    )
+    @Range(min = 1, max = 5)
+    default int lootDuringCombatRange() {
+        return 2;
+    }
+
+    @ConfigItem(
             keyName = "lootSmoulderingFlesh",
             name = "Loot Smouldering Flesh",
             description = "Loot 'Smouldering pile of flesh' (heals 10 HP, can overheal). During combat: emergency only (at/below HP threshold). After combat: always picked up.",
             section = lootingSection,
-            position = 3
+            position = 5
     )
     default boolean lootSmoulderingFlesh() {
         return true;
@@ -664,7 +687,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Flesh HP Threshold %",
             description = "During combat: only loot flesh at or below this HP %. Keep low for emergency-only. After combat it's always looted regardless.",
             section = lootingSection,
-            position = 4
+            position = 6
     )
     @Range(min = 10, max = 100)
     default int smoulderingFleshHpThreshold() {
@@ -676,7 +699,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Loot Smouldering Gland",
             description = "Loot 'Smouldering gland' (restores 10 prayer). During combat: emergency only (at/below prayer threshold). After combat: always picked up.",
             section = lootingSection,
-            position = 5
+            position = 7
     )
     default boolean lootSmoulderingGland() {
         return true;
@@ -687,7 +710,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Gland Prayer Threshold %",
             description = "During combat: only loot gland at or below this prayer %. Keep low for emergency-only. After combat it's always looted regardless.",
             section = lootingSection,
-            position = 6
+            position = 8
     )
     @Range(min = 10, max = 90)
     default int smoulderingGlandPrayerThreshold() {
@@ -699,7 +722,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Loot Smouldering Heart",
             description = "Loot 'Smouldering heart' (boosts Attack/Str/Range/Magic by 2). Only picked up after combat, never mid-fight.",
             section = lootingSection,
-            position = 7
+            position = 9
     )
     default boolean lootSmoulderingHeart() {
         return true;

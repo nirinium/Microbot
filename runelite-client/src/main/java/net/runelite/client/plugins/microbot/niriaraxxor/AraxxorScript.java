@@ -138,11 +138,21 @@ public class AraxxorScript extends Script {
     // Pre-computed dodge destination — set by event handler for immediate reaction
     private volatile WorldPoint precomputedAcidDodge = null;
 
+    // Pre-computed cleave dodge destination — set on same game tick as detection
+    private volatile WorldPoint precomputedCleaveDodge = null;
+    // Tick when cleave was detected — used to measure reaction time
+    private volatile int cleaveDetectedTick = 0;
+    // Tick when last cleave dodge walk completed — used to prevent stepping back under too soon
+    private volatile int lastCleaveDodgeTick = 0;
+
     // Cleave AoE tracking — the 3 danger tiles from the most recent cleave
     private volatile Set<WorldPoint> cleaveDangerTiles = new HashSet<>();
     // Normalized attack direction (Araxxor→Player) at the moment the cleave fired
     private volatile int cleaveAttackDirX = 0;
     private volatile int cleaveAttackDirY = 0;
+    // Last known non-zero attack direction — used as fallback when player is on boss tile (0,0)
+    private volatile int lastKnownAtkDirX = 0;
+    private volatile int lastKnownAtkDirY = 0;
 
     // Arena center — set when we first find Araxxor, used to bias all movement toward center
     private volatile WorldPoint arenaCenter = null;
@@ -196,6 +206,8 @@ public class AraxxorScript extends Script {
         if (animationId == ANIM_ENRAGE_MELEE) {
             cleaveIncoming = true;
             computeCleaveTiles();
+            // Issue dodge walk on the SAME game tick for fastest possible reaction
+            precomputeAndDodgeCleave();
         }
 
         // Detect acid special attacks
@@ -337,6 +349,7 @@ public class AraxxorScript extends Script {
             dodgeCleave(player);
             cleaveIncoming = false;
             clearCleaveTiles();
+            precomputedCleaveDodge = null;
             return;
         }
 
@@ -477,6 +490,7 @@ public class AraxxorScript extends Script {
             dodgeCleave(player);
             cleaveIncoming = false;
             clearCleaveTiles();
+            precomputedCleaveDodge = null;
             return true;
         }
         return false;
@@ -665,9 +679,13 @@ public class AraxxorScript extends Script {
      * recoils 50% of that to player. Must kill with ranged/magic/halberd (no melee recoil).
      * Noxious halberd 1-hits them.
      * <p>
-     * Critical: the halberd has 2-tile reach, so we must be EXACTLY 1 cardinal tile
-     * away (not diagonal, not on top). We verify true tile distance before attacking
-     * and re-verify inside the wait loop after any dodge repositions us.
+     * Critical: with a halberd we must maintain the configured safe distance (default 2 tiles)
+     * between us and the mirrorback to avoid reflected damage. At distance 1 (adjacent),
+     * the mirrorback reflects heavy damage back to the player. At distance 2, the halberd's
+     * extended reach lets us hit safely without reflection.
+     * <p>
+     * We verify true tile distance before attacking and re-verify inside the wait loop
+     * after any dodge repositions us.
      */
     private boolean handleMirrorback(Player player, Rs2NpcModel mirrorback) {
         state = AraxxorState.KILLING_MIRRORBACK;
@@ -677,33 +695,38 @@ public class AraxxorScript extends Script {
         if (checkAndDodgeCleave(player)) return true;
         if (checkAndDodgeAcidCannon(player)) return true;
 
-        // We need to be exactly 1 cardinal tile away (not diagonal, not on top).
-        // Use real tile difference, not Chebyshev distanceTo().
+        int safeDist = config.mirrorbackSafeDistance();
+
+        // Check if we're at the correct distance from the mirrorback.
+        // For halberd (safeDist=2): need exactly 2 cardinal tiles (1 tile gap).
+        // For melee  (safeDist=1): need exactly 1 cardinal tile (adjacent).
         WorldPoint mbLoc = mirrorback.getWorldLocation();
         WorldPoint playerLoc = player.getWorldLocation();
         int relX = Math.abs(playerLoc.getX() - mbLoc.getX());
         int relY = Math.abs(playerLoc.getY() - mbLoc.getY());
-        boolean exactlyOneCardinal = (relX + relY == 1); // one axis is 1, other is 0
+        // Cardinal distance: one axis equals safeDist, the other is 0
+        boolean atCorrectDistance = (relX == safeDist && relY == 0) || (relX == 0 && relY == safeDist);
 
-        if (!exactlyOneCardinal) {
-            // Walk to a cardinal-adjacent tile (1 tile N/S/E/W, never diagonal)
-            WorldPoint[] adjacentTiles = {
-                    new WorldPoint(mbLoc.getX(), mbLoc.getY() - 1, mbLoc.getPlane()),  // south
-                    new WorldPoint(mbLoc.getX() + 1, mbLoc.getY(), mbLoc.getPlane()),  // east
-                    new WorldPoint(mbLoc.getX() - 1, mbLoc.getY(), mbLoc.getPlane()),  // west
-                    new WorldPoint(mbLoc.getX(), mbLoc.getY() + 1, mbLoc.getPlane()),  // north
+        if (!atCorrectDistance) {
+            // Walk to a cardinal tile at the safe distance
+            WorldPoint[] targetTiles = {
+                    new WorldPoint(mbLoc.getX(), mbLoc.getY() - safeDist, mbLoc.getPlane()),  // south
+                    new WorldPoint(mbLoc.getX() + safeDist, mbLoc.getY(), mbLoc.getPlane()),  // east
+                    new WorldPoint(mbLoc.getX() - safeDist, mbLoc.getY(), mbLoc.getPlane()),  // west
+                    new WorldPoint(mbLoc.getX(), mbLoc.getY() + safeDist, mbLoc.getPlane()),  // north
             };
-            WorldPoint best = pickBestTile(adjacentTiles);
+            WorldPoint best = pickBestTile(targetTiles);
             Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
             if (tickSleep()) return true; // interrupted by dodge
-            // Wait until we actually arrive at 1 cardinal tile distance
+            // Wait until we actually arrive at the correct distance
+            final int sd = safeDist;
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
                 Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
                 if (p == null || mb == null || mb.isDead()) return true;
                 int rx = Math.abs(p.getWorldLocation().getX() - mb.getWorldLocation().getX());
                 int ry = Math.abs(p.getWorldLocation().getY() - mb.getWorldLocation().getY());
-                return (rx + ry == 1);
+                return (rx == sd && ry == 0) || (rx == 0 && ry == sd);
             }, 1800);
             return true; // let loop re-verify position
         }
@@ -742,7 +765,7 @@ public class AraxxorScript extends Script {
 
         // Wait until the mirrorback is actually dead before switching back.
         // Check for cleave dodges while we wait so we don't eat a "Skree!".
-        // Also re-verify 1-tile cardinal distance and reposition if a dodge moved us.
+        // Also re-verify safe distance and reposition if a dodge moved us.
         sleepUntil(() -> {
             Player p = Microbot.getClient().getLocalPlayer();
             if (p != null) {
@@ -757,18 +780,20 @@ public class AraxxorScript extends Script {
             if (mb != null && !mb.isDead()) {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p != null) {
-                    // Re-verify cardinal 1-tile distance; reposition if needed
+                    // Re-verify safe distance; reposition if needed
                     WorldPoint pLoc = p.getWorldLocation();
                     WorldPoint mLoc = mb.getWorldLocation();
                     int rx = Math.abs(pLoc.getX() - mLoc.getX());
                     int ry = Math.abs(pLoc.getY() - mLoc.getY());
-                    if (rx + ry != 1) {
-                        // Not at correct distance — walk to nearest cardinal tile
+                    int sd = config.mirrorbackSafeDistance();
+                    boolean ok = (rx == sd && ry == 0) || (rx == 0 && ry == sd);
+                    if (!ok) {
+                        // Not at correct distance — walk to nearest cardinal tile at safe distance
                         WorldPoint[] adj = {
-                                new WorldPoint(mLoc.getX(), mLoc.getY() - 1, mLoc.getPlane()),
-                                new WorldPoint(mLoc.getX() + 1, mLoc.getY(), mLoc.getPlane()),
-                                new WorldPoint(mLoc.getX() - 1, mLoc.getY(), mLoc.getPlane()),
-                                new WorldPoint(mLoc.getX(), mLoc.getY() + 1, mLoc.getPlane()),
+                                new WorldPoint(mLoc.getX(), mLoc.getY() - sd, mLoc.getPlane()),
+                                new WorldPoint(mLoc.getX() + sd, mLoc.getY(), mLoc.getPlane()),
+                                new WorldPoint(mLoc.getX() - sd, mLoc.getY(), mLoc.getPlane()),
+                                new WorldPoint(mLoc.getX(), mLoc.getY() + sd, mLoc.getPlane()),
                         };
                         WorldPoint best = pickBestTile(adj);
                         Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
@@ -887,6 +912,13 @@ public class AraxxorScript extends Script {
 
         WorldPoint araxxorLoc = araxxor.getWorldLocation();
         WorldPoint playerLoc = player.getWorldLocation();
+        int currentTick = Microbot.getClient().getTickCount();
+
+        // ── Dodge cooldown: don't step back under too soon after dodging ──
+        // After a cleave dodge, we must wait at least 2 game ticks before stepping
+        // under Araxxor again. Otherwise the step-under walk can OVERRIDE the dodge
+        // walk within the same game tick, leaving us on the cleave AoE.
+        boolean recentlyDodged = (currentTick - lastCleaveDodgeTick) < 2;
 
         // ── Check acid density around Araxxor ──
         int acidNearBoss = countAcidInArea(araxxorLoc, 2); // 5x5 area (±2 tiles)
@@ -911,6 +943,17 @@ public class AraxxorScript extends Script {
         }
 
         // ── Step under Araxxor for cleave self-damage ──
+        // SKIP stepping under if we recently dodged — wait for the cleave to fully
+        // resolve before walking back in. Just attack from current position (the game
+        // will auto-path us to melee range, usually 1 tile adjacent — NOT on top).
+        if (recentlyDodged) {
+            status = "Enraged — dodge cooldown, attacking from range";
+            tickSleep();
+            Rs2Player.eatAt(config.eatAtHpPercent());
+            drinkPrayerPotion();
+            return;
+        }
+
         int dist = playerLoc.distanceTo(araxxorLoc);
         if (dist > 1) {
             // Only reposition if we're more than 1 tile away (melee range is fine)
@@ -995,74 +1038,134 @@ public class AraxxorScript extends Script {
      * The cleave targets a 1x3 area where the player was standing, oriented
      * PERPENDICULAR to the Araxxor→Player direction.
      * <p>
+     * If a pre-computed dodge was already issued by the event handler (same-tick reaction),
+     * we just spam-click it for reliability and counter-attack. Otherwise we compute and
+     * walk as a fallback.
+     * <p>
      * To avoid the cleave, we move PARALLEL to the attack direction (toward or
      * away from Araxxor along its attack line). This guarantees we leave the
      * 3-tile perpendicular strip immediately without crossing through it.
      * <p>
-     * Candidates are scored via pickBestTile() which now penalizes cleave tiles
+     * Candidates are scored via pickBestTile() which penalizes cleave tiles
      * on both the destination and the path, preventing path-through-damage.
      */
     private void dodgeCleave(Player player) {
         state = AraxxorState.ENRAGED_DODGE_CLEAVE;
         WorldPoint loc = player.getWorldLocation();
 
+        WorldPoint dodgeDest;
+        if (precomputedCleaveDodge != null) {
+            // Pre-computed dodge already issued on the detection tick — use it
+            dodgeDest = precomputedCleaveDodge;
+            log("Cleave dodge: using pre-computed destination → " + dodgeDest);
+        } else {
+            // Fallback: compute now (slightly delayed but still functional)
+            dodgeDest = computeCleaveDodgeDestination(loc);
+            log("Cleave dodge: computed fallback destination → " + dodgeDest);
+        }
+
+        // Spam-click the dodge destination for reliable movement (3 clicks, 50ms apart)
+        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), dodgeDest));
+        sleep(50, 80);
+        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), dodgeDest));
+        sleep(50, 80);
+        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), dodgeDest));
+
+        // Record dodge tick — prevents handleEnrageFight from stepping back under too soon
+        lastCleaveDodgeTick = Microbot.getClient().getTickCount();
+
+        // Wait a FULL game tick (600ms) for the dodge movement to register and the
+        // cleave damage to resolve. Without this, the main loop can issue a step-under
+        // walk that OVERRIDES the dodge walk within the same game tick.
+        sleep(600, 700);
+
+        // Counter-attack from current (safe) position — the game will auto-path to melee range
+        Rs2NpcModel bossTarget = Rs2Npc.getNpc(ARAXXOR_ID);
+        if (bossTarget != null) {
+            Rs2Npc.interact(bossTarget, "attack");
+        }
+    }
+
+    /**
+     * Pre-compute cleave dodge and initiate walk IMMEDIATELY.
+     * Called from event handlers (onAraxxorAnimation, onOverheadTextChanged) to
+     * react on the SAME game tick the cleave is detected, bypassing the main loop delay.
+     * <p>
+     * This mirrors the acid cannon's precomputeAndDodgeAcidCannon() pattern.
+     */
+    public void precomputeAndDodgeCleave() {
+        Player player = Microbot.getClient().getLocalPlayer();
+        if (player == null) return;
+
+        WorldPoint playerLoc = player.getWorldLocation();
+        WorldPoint dodge = computeCleaveDodgeDestination(playerLoc);
+        precomputedCleaveDodge = dodge;
+        cleaveDetectedTick = Microbot.getClient().getTickCount();
+
+        // Issue walk IMMEDIATELY — queues on the current game tick
+        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), dodge));
+        log("Pre-computed cleave dodge → " + dodge + " (immediate walk on tick " + cleaveDetectedTick + ")");
+    }
+
+    /**
+     * Compute the best dodge destination for a cleave attack.
+     * Pure computation: generates candidates parallel to the attack direction
+     * and scores them via pickBestTile().
+     *
+     * @param playerLoc player position at time of cleave detection
+     * @return the best dodge tile
+     */
+    private WorldPoint computeCleaveDodgeDestination(WorldPoint playerLoc) {
         // Determine dodge distance based on diagonal/corner position
         Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
         boolean onCorner = false;
         if (araxxor != null) {
             WorldPoint bossLoc = araxxor.getWorldLocation();
-            int relX = loc.getX() - bossLoc.getX();
-            int relY = loc.getY() - bossLoc.getY();
+            int relX = playerLoc.getX() - bossLoc.getX();
+            int relY = playerLoc.getY() - bossLoc.getY();
             onCorner = (relX != 0 && relY != 0);
         }
 
         int dodgeDist = onCorner ? 3 : 2;
 
-        // Use stored attack direction if available; otherwise fall back to boss-relative calculation
+        // Use stored attack direction if available; otherwise fall back to boss-relative
         int atkX = cleaveAttackDirX;
         int atkY = cleaveAttackDirY;
+        if (atkX == 0 && atkY == 0) {
+            // Try last known direction (from when we were NOT on boss tile)
+            atkX = lastKnownAtkDirX;
+            atkY = lastKnownAtkDirY;
+        }
         if (atkX == 0 && atkY == 0 && araxxor != null) {
             WorldPoint bossLoc = araxxor.getWorldLocation();
-            atkX = Integer.signum(loc.getX() - bossLoc.getX());
-            atkY = Integer.signum(loc.getY() - bossLoc.getY());
+            atkX = Integer.signum(playerLoc.getX() - bossLoc.getX());
+            atkY = Integer.signum(playerLoc.getY() - bossLoc.getY());
         }
 
         java.util.List<WorldPoint> candidates = new java.util.ArrayList<>();
 
         if (atkX != 0 || atkY != 0) {
             // PRIMARY: move parallel to attack direction (away from OR toward boss)
-            // These tiles are guaranteed to be off the perpendicular cleave strip
-            candidates.add(new WorldPoint(loc.getX() + atkX * dodgeDist, loc.getY() + atkY * dodgeDist, loc.getPlane()));
-            candidates.add(new WorldPoint(loc.getX() - atkX * dodgeDist, loc.getY() - atkY * dodgeDist, loc.getPlane()));
+            candidates.add(new WorldPoint(playerLoc.getX() + atkX * dodgeDist, playerLoc.getY() + atkY * dodgeDist, playerLoc.getPlane()));
+            candidates.add(new WorldPoint(playerLoc.getX() - atkX * dodgeDist, playerLoc.getY() - atkY * dodgeDist, playerLoc.getPlane()));
             // Slightly shorter parallel fallbacks
-            candidates.add(new WorldPoint(loc.getX() + atkX * 2, loc.getY() + atkY * 2, loc.getPlane()));
-            candidates.add(new WorldPoint(loc.getX() - atkX * 2, loc.getY() - atkY * 2, loc.getPlane()));
+            candidates.add(new WorldPoint(playerLoc.getX() + atkX * 2, playerLoc.getY() + atkY * 2, playerLoc.getPlane()));
+            candidates.add(new WorldPoint(playerLoc.getX() - atkX * 2, playerLoc.getY() - atkY * 2, playerLoc.getPlane()));
         }
 
-        // SECONDARY: diagonal escapes (likely clear of the strip at sufficient distance)
-        candidates.add(new WorldPoint(loc.getX() + 2, loc.getY() + 2, loc.getPlane()));
-        candidates.add(new WorldPoint(loc.getX() - 2, loc.getY() - 2, loc.getPlane()));
-        candidates.add(new WorldPoint(loc.getX() + 2, loc.getY() - 2, loc.getPlane()));
-        candidates.add(new WorldPoint(loc.getX() - 2, loc.getY() + 2, loc.getPlane()));
+        // SECONDARY: diagonal escapes
+        candidates.add(new WorldPoint(playerLoc.getX() + 2, playerLoc.getY() + 2, playerLoc.getPlane()));
+        candidates.add(new WorldPoint(playerLoc.getX() - 2, playerLoc.getY() - 2, playerLoc.getPlane()));
+        candidates.add(new WorldPoint(playerLoc.getX() + 2, playerLoc.getY() - 2, playerLoc.getPlane()));
+        candidates.add(new WorldPoint(playerLoc.getX() - 2, playerLoc.getY() + 2, playerLoc.getPlane()));
 
-        // FALLBACK: cardinal directions at dodge distance (scored — cleave tiles penalized)
-        candidates.add(new WorldPoint(loc.getX() + dodgeDist, loc.getY(), loc.getPlane()));
-        candidates.add(new WorldPoint(loc.getX() - dodgeDist, loc.getY(), loc.getPlane()));
-        candidates.add(new WorldPoint(loc.getX(), loc.getY() + dodgeDist, loc.getPlane()));
-        candidates.add(new WorldPoint(loc.getX(), loc.getY() - dodgeDist, loc.getPlane()));
+        // FALLBACK: cardinal directions
+        candidates.add(new WorldPoint(playerLoc.getX() + dodgeDist, playerLoc.getY(), playerLoc.getPlane()));
+        candidates.add(new WorldPoint(playerLoc.getX() - dodgeDist, playerLoc.getY(), playerLoc.getPlane()));
+        candidates.add(new WorldPoint(playerLoc.getX(), playerLoc.getY() + dodgeDist, playerLoc.getPlane()));
+        candidates.add(new WorldPoint(playerLoc.getX(), playerLoc.getY() - dodgeDist, playerLoc.getPlane()));
 
-        // pickBestTile scores all candidates — cleave tiles on path/destination get +1000/+500 penalty
-        WorldPoint best = pickBestTile(candidates.toArray(new WorldPoint[0]));
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
-        sleep(600); // 1 tick for dodge movement to register
-
-        // Counter-attack immediately after dodging to maintain DPS uptime
-        if (enraged) {
-            Rs2NpcModel bossTarget = Rs2Npc.getNpc(ARAXXOR_ID);
-            if (bossTarget != null) {
-                Rs2Npc.interact(bossTarget, "attack");
-            }
-        }
+        return pickBestTile(candidates.toArray(new WorldPoint[0]));
     }
 
     // ── Acid Special Attack Handling ────────────────────
@@ -1449,6 +1552,20 @@ public class AraxxorScript extends Script {
         int atkDirX = Integer.signum(playerLoc.getX() - bossLoc.getX());
         int atkDirY = Integer.signum(playerLoc.getY() - bossLoc.getY());
 
+        // When player is on the same tile as the boss (step-under), atkDir is (0,0).
+        // Fall back to the last known direction from when we were NOT on the boss tile.
+        if (atkDirX == 0 && atkDirY == 0) {
+            if (lastKnownAtkDirX != 0 || lastKnownAtkDirY != 0) {
+                atkDirX = lastKnownAtkDirX;
+                atkDirY = lastKnownAtkDirY;
+                log("Using last known atk dir for cleave: " + atkDirX + "," + atkDirY);
+            }
+        } else {
+            // Store this valid direction for future fallback
+            lastKnownAtkDirX = atkDirX;
+            lastKnownAtkDirY = atkDirY;
+        }
+
         // Store attack direction for dodge candidate generation
         cleaveAttackDirX = atkDirX;
         cleaveAttackDirY = atkDirY;
@@ -1457,7 +1574,7 @@ public class AraxxorScript extends Script {
         int perpX = -atkDirY;
         int perpY = atkDirX;
 
-        // If attack direction is zero (on same tile), default perpendicular to E-W
+        // If attack direction is zero (on same tile, no last-known), default perpendicular to E-W
         if (perpX == 0 && perpY == 0) {
             perpX = 1;
             perpY = 0;
@@ -1506,6 +1623,7 @@ public class AraxxorScript extends Script {
         cleaveDangerTiles = new HashSet<>();
         cleaveAttackDirX = 0;
         cleaveAttackDirY = 0;
+        precomputedCleaveDodge = null;
     }
 
     // ── Movement Helpers ────────────────────────────────
@@ -1748,6 +1866,11 @@ public class AraxxorScript extends Script {
         acidCannonIncoming = false;
         acidCannonSourceTile = null;
         precomputedAcidDodge = null;
+        precomputedCleaveDodge = null;
+        cleaveDetectedTick = 0;
+        lastCleaveDodgeTick = 0;
+        lastKnownAtkDirX = 0;
+        lastKnownAtkDirY = 0;
         arenaCenter = null;
         acidPools.clear();
     }
