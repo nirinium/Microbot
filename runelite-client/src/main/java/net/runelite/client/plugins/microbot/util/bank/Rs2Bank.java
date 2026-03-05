@@ -1183,7 +1183,16 @@ public class Rs2Bank {
         boolean hasX = configuredX > 0;
         boolean isInventory = (container == BANK_INVENTORY_ITEM_CONTAINER);
         int xSetOffset = -1;
-        int xPromptOffset = isInventory ? 7 : 6;
+        // When no stored X value exists and the bank isn't in X or All mode,
+        // the "Withdraw-[stored X]" option is absent, shifting the prompt one slot earlier.
+        int xPromptOffset;
+        if (isInventory) {
+            xPromptOffset = 7;
+        } else if (!hasX && selected != 3 && selected != 4) {
+            xPromptOffset = 5;
+        } else {
+            xPromptOffset = 6;
+        }
 
         if (hasX) {
             switch (selected) {
@@ -2668,8 +2677,8 @@ public class Rs2Bank {
 
     public static boolean setWithdrawAs(boolean noted) {
         if (isWithdrawAs(noted)) return true;
-        int target = noted ? InterfaceID.Bankmain.NOTE : InterfaceID.Bankmain.QUANTITY1_TEXT;
-        boolean clicked = Rs2Widget.clickWidget(target);
+        // NOTE is a toggle widget — clicking it switches between Item and Note mode
+        boolean clicked = Rs2Widget.clickWidget(InterfaceID.Bankmain.NOTE);
         if (!clicked) return false;
         return sleepUntil(() -> isWithdrawAs(noted));
     }
