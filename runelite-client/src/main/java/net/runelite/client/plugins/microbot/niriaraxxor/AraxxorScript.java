@@ -17,6 +17,7 @@ import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
 import net.runelite.client.plugins.microbot.util.grounditem.LootingParameters;
 import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
+import net.runelite.client.plugins.microbot.util.grounditem.Rs2LootEngine;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.magic.thralls.Rs2Thrall;
 import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
@@ -93,6 +94,14 @@ public class AraxxorScript extends Script {
     private static final int VENOM_PUDDLE_2 = ObjectID1.ARAXXOR_VENOM_PUDDLE02;   // 54256
     private static final int VENOM_PUDDLE_3 = ObjectID1.ARAXXOR_VENOM_PUDDLE03;   // 54257
 
+    // Loot targets
+    private static final Set<String> ARAXXOR_UNIQUE_DROPS = new HashSet<>(Arrays.asList(
+            "noxious point", "noxious blade", "noxious pommel",
+            "araxyte fang", "araxyte venom sack", "jar of venom",
+            "spider cave teleport"));
+    private static final Set<String> ARAXXOR_SUPPLY_DROPS = new HashSet<>(Arrays.asList(
+            "shark", "prayer potion", "super combat potion"));
+
     // ── State ───────────────────────────────────────────
     @Getter
     @Setter
@@ -168,6 +177,7 @@ public class AraxxorScript extends Script {
     public boolean run(AraxxorConfig config) {
         this.config = config;
         state = AraxxorState.IDLE;
+        status = "Starting...";
         killCount = 0;
         enraged = false;
         specHitsCompleted = 0;
@@ -330,7 +340,7 @@ public class AraxxorScript extends Script {
         // The explosion hits for up to 80 damage at melee range. At 3+ tiles it's only ~7.
         // We flee at distance ≤ 2 (one tile BEFORE it can reach us) to guarantee we're
         // gone before it arrives on our tile and triggers the explosion.
-        Rs2NpcModel rupturaUrgent = Rs2Npc.getNpc(RUPTURA_ID);
+        Rs2NpcModel rupturaUrgent = findNearestNpc(RUPTURA_ID);
         if (rupturaUrgent != null && !rupturaUrgent.isDead()) {
             WorldPoint ruptLoc = rupturaUrgent.getWorldLocation();
             int ruptDist = player.getWorldLocation().distanceTo(ruptLoc);
@@ -357,11 +367,11 @@ public class AraxxorScript extends Script {
         // Active poll: check if the acid cannon projectile NPC (13676) is alive in case
         // event-based detection (animation / NPC spawn) was missed entirely.
         if (!acidCannonIncoming) {
-            Rs2NpcModel cannonNpc = Rs2Npc.getNpc(ACID_CANNON_PROJ_NPC);
+            Rs2NpcModel cannonNpc = findNearestNpc(ACID_CANNON_PROJ_NPC);
             if (cannonNpc != null && !cannonNpc.isDead()) {
                 log("Acid cannon detected via active polling!");
                 acidCannonIncoming = true;
-                Rs2NpcModel boss = Rs2Npc.getNpc(ARAXXOR_ID);
+                Rs2NpcModel boss = findNearestNpc(ARAXXOR_ID);
                 if (boss != null) {
                     acidCannonSourceTile = boss.getWorldLocation();
                 }
@@ -407,7 +417,7 @@ public class AraxxorScript extends Script {
         // acid cannon dodge) that may have pushed us far out, not every loop tick.
 
         // ── 5. Find Araxxor ──
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel araxxor = findNearestNpc(ARAXXOR_ID);
 
         // No boss found — could be dead/looting/idle
         if (araxxor == null) {
@@ -455,7 +465,6 @@ public class AraxxorScript extends Script {
         status = "Fighting Araxxor";
         state = AraxxorState.FIGHTING;
 
-        WorldPoint araxxorLoc = araxxor.getWorldLocation();
         WorldPoint playerLoc = player.getWorldLocation();
 
         // Only reposition if we're standing on acid — otherwise stay put and fight.
@@ -511,20 +520,20 @@ public class AraxxorScript extends Script {
         if (checkAndDodgeAcidCannon(player)) return true;
 
         // ── Ruptura (red) — most dangerous, explodes for up to 80 damage ──
-        Rs2NpcModel ruptura = Rs2Npc.getNpc(RUPTURA_ID);
+        Rs2NpcModel ruptura = findNearestNpc(RUPTURA_ID);
         if (ruptura != null && !ruptura.isDead()) {
             return handleRuptura(player, araxxor, ruptura);
         }
 
         // ── Mirrorback (white) — reflects damage ──
-        Rs2NpcModel mirrorback = Rs2Npc.getNpc(MIRRORBACK_ID);
+        Rs2NpcModel mirrorback = findNearestNpc(MIRRORBACK_ID);
         if (mirrorback != null && !mirrorback.isDead()) {
             return handleMirrorback(player, mirrorback);
         }
 
         // ── Acidic (green) — ranged attacks, explodes on death ──
         if (config.killAcidicAraxytes()) {
-            Rs2NpcModel acidic = Rs2Npc.getNpc(ACIDIC_ID);
+            Rs2NpcModel acidic = findNearestNpc(ACIDIC_ID);
             if (acidic != null && !acidic.isDead()) {
                 return handleAcidic(player, acidic);
             }
@@ -568,7 +577,7 @@ public class AraxxorScript extends Script {
                 checkAndDodgeCleave(p);
                 checkAndDodgeAcidCannon(p);
 
-                Rs2NpcModel rupt = Rs2Npc.getNpc(RUPTURA_ID);
+                Rs2NpcModel rupt = findNearestNpc(RUPTURA_ID);
                 if (rupt == null || rupt.isDead()) {
                     return true; // It's dead, safe to proceed
                 }
@@ -722,7 +731,7 @@ public class AraxxorScript extends Script {
             final int sd = safeDist;
             sleepUntil(() -> {
                 Player p = Microbot.getClient().getLocalPlayer();
-                Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
+                Rs2NpcModel mb = findNearestNpc(MIRRORBACK_ID);
                 if (p == null || mb == null || mb.isDead()) return true;
                 int rx = Math.abs(p.getWorldLocation().getX() - mb.getWorldLocation().getX());
                 int ry = Math.abs(p.getWorldLocation().getY() - mb.getWorldLocation().getY());
@@ -772,11 +781,11 @@ public class AraxxorScript extends Script {
                 checkAndDodgeCleave(p);
                 checkAndDodgeAcidCannon(p);
             }
-            Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
+            Rs2NpcModel mb = findNearestNpc(MIRRORBACK_ID);
             return mb == null || mb.isDead();
         }, () -> {
             // Keep re-attacking if we stopped interacting (e.g. after a dodge)
-            Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
+            Rs2NpcModel mb = findNearestNpc(MIRRORBACK_ID);
             if (mb != null && !mb.isDead()) {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p != null) {
@@ -866,16 +875,16 @@ public class AraxxorScript extends Script {
                 checkAndDodgeCleave(p);
                 checkAndDodgeAcidCannon(p);
             }
-            Rs2NpcModel ac = Rs2Npc.getNpc(ACIDIC_ID);
+            Rs2NpcModel ac = findNearestNpc(ACIDIC_ID);
             return ac == null || ac.isDead();
         }, () -> {
             // Keep re-attacking if we stopped interacting (e.g. after a dodge)
-            Rs2NpcModel ac = Rs2Npc.getNpc(ACIDIC_ID);
+            Rs2NpcModel ac = findNearestNpc(ACIDIC_ID);
             if (ac != null && !ac.isDead()) {
                 Player p = Microbot.getClient().getLocalPlayer();
                 if (p != null && !p.isInteracting()) {
-                    Rs2Npc.interact(ac, "attack");
-                }
+                        Rs2Npc.interact(ac, "attack");
+                    }
             }
         }, 6000, 600);
 
@@ -1080,7 +1089,7 @@ public class AraxxorScript extends Script {
         sleep(600, 700);
 
         // Counter-attack from current (safe) position — the game will auto-path to melee range
-        Rs2NpcModel bossTarget = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel bossTarget = findNearestNpc(ARAXXOR_ID);
         if (bossTarget != null) {
             Rs2Npc.interact(bossTarget, "attack");
         }
@@ -1117,7 +1126,7 @@ public class AraxxorScript extends Script {
      */
     private WorldPoint computeCleaveDodgeDestination(WorldPoint playerLoc) {
         // Determine dodge distance based on diagonal/corner position
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel araxxor = findNearestNpc(ARAXXOR_ID);
         boolean onCorner = false;
         if (araxxor != null) {
             WorldPoint bossLoc = araxxor.getWorldLocation();
@@ -1332,7 +1341,7 @@ public class AraxxorScript extends Script {
      *   Phase 1: Move 1 tile adjacent, then attack
      */
     private void handleAcidDrip(Player player) {
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel araxxor = findNearestNpc(ARAXXOR_ID);
         if (araxxor == null) {
             acidDripActive = false;
             return;
@@ -1376,7 +1385,7 @@ public class AraxxorScript extends Script {
      * After all spec hits land, optionally drinks a surge potion before switching back.
      */
     private boolean performSpecialAttack(Rs2NpcModel araxxor) {
-        int specEnergy = Microbot.getClient().getVarpValue(300) / 10; // 0–100
+        int specEnergy = Rs2Combat.getSpecEnergy() / 10; // 0–100 (Rs2Combat returns 0–1000)
         String specWeapon = config.specWeapon().toLowerCase();
         int specPerHit = specWeapon.contains("dragon warhammer") ? 50 : 50; // both 50%
         int hitsRemaining = config.specCount() - specHitsCompleted;
@@ -1413,15 +1422,14 @@ public class AraxxorScript extends Script {
         tickSleep();
 
         // Wait for the hit to register (player animation plays)
-        sleepUntil(() -> Microbot.getClient().getLocalPlayer() != null
-                && Microbot.getClient().getLocalPlayer().getAnimation() != -1, 1800);
+        sleepUntil(Rs2Player::isAnimating, 1800);
         tickSleep(); // Let the hit land
 
         specHitsCompleted++;
         log("Spec hit " + specHitsCompleted + "/" + config.specCount() + " landed");
 
         // If we still have hits remaining AND enough energy, stay on spec weapon for next loop iteration
-        int energyAfter = Microbot.getClient().getVarpValue(300) / 10;
+        int energyAfter = Rs2Combat.getSpecEnergy() / 10;
         if (specHitsCompleted < config.specCount() && energyAfter >= specPerHit) {
             // Don't switch back yet — main loop will call us again next iteration
             return true;
@@ -1459,8 +1467,8 @@ public class AraxxorScript extends Script {
     private void drinkPotions() {
         CombatPotionType potionType = config.combatPotionType();
         if (potionType != CombatPotionType.NONE) {
-            boolean hasCombatBoost = Microbot.getClient().getBoostedSkillLevel(Skill.STRENGTH)
-                    > Microbot.getClient().getRealSkillLevel(Skill.STRENGTH);
+            boolean hasCombatBoost = Rs2Player.getBoostedSkillLevel(Skill.STRENGTH)
+                    > Rs2Player.getRealSkillLevel(Skill.STRENGTH);
             if (!hasCombatBoost) {
                 Rs2Inventory.interact(potionType.getInventoryName(), "drink");
                 tickSleep();
@@ -1468,7 +1476,8 @@ public class AraxxorScript extends Script {
         }
 
         if (config.useExtendedAntiVenom() && !Rs2Player.hasAntiVenomActive()) {
-            if (Rs2Inventory.interact("extended anti-venom", "drink")
+            if (Rs2Inventory.interact("extended anti-venom+", "drink")
+                    || Rs2Inventory.interact("anti-venom+", "drink")
                     || Rs2Inventory.interact("anti-venom", "drink")) {
                 tickSleep();
             }
@@ -1476,12 +1485,9 @@ public class AraxxorScript extends Script {
     }
 
     private void drinkPrayerPotion() {
-        int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
-                / Math.max(1, Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
-        if (prayerPercent < config.drinkPrayerAtPercent()) {
-            Rs2Inventory.interact(Rs2Potion.getPrayerPotionsVariants().toArray(String[]::new), "drink");
-            tickSleep();
-        }
+        int maxPrayer = Rs2Player.getRealSkillLevel(Skill.PRAYER);
+        int thresholdPoints = Math.max(1, (maxPrayer * config.drinkPrayerAtPercent()) / 100);
+        Rs2Player.drinkPrayerPotionAt(thresholdPoints);
     }
 
     // ── Prayer Management ───────────────────────────────
@@ -1491,8 +1497,8 @@ public class AraxxorScript extends Script {
             Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
         }
         if (config.usePiety()) {
-            if (Microbot.getClient().getRealSkillLevel(Skill.PRAYER) >= 70
-                    && Microbot.getClient().getRealSkillLevel(Skill.DEFENCE) >= 70) {
+            if (Rs2Player.getRealSkillLevel(Skill.PRAYER) >= 70
+                    && Rs2Player.getRealSkillLevel(Skill.DEFENCE) >= 70) {
                 Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, true);
             }
         }
@@ -1542,7 +1548,7 @@ public class AraxxorScript extends Script {
      */
     public void computeCleaveTiles() {
         Player player = Microbot.getClient().getLocalPlayer();
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel araxxor = findNearestNpc(ARAXXOR_ID);
         if (player == null || araxxor == null) return;
 
         WorldPoint playerLoc = player.getWorldLocation();
@@ -1804,15 +1810,10 @@ public class AraxxorScript extends Script {
     // ── Post-fight Handling ─────────────────────────────
 
     private void handleNoBoss() {
-        // Check if we're in the looting state
-        if (state == AraxxorState.LOOTING) {
-            status = "Looting...";
-            lootItems();
-            return;
-        }
-
-        // Check if boss corpse exists for harvesting/destroying
-        Rs2NpcModel deadAraxxor = Rs2Npc.getNpc(ARAXXOR_DEAD_ID);
+        // Check if boss corpse exists first — must interact with it before items appear on ground.
+        // onAraxxorDeath() sets state=LOOTING immediately, but ground items only spawn AFTER
+        // the corpse is harvested/destroyed. So corpse interaction must come before any loot attempt.
+        Rs2NpcModel deadAraxxor = findNearestNpc(ARAXXOR_DEAD_ID);
         if (deadAraxxor != null) {
             state = AraxxorState.LOOTING;
             status = config.harvestCorpse() ? "Harvesting corpse..." : "Destroying corpse...";
@@ -1820,6 +1821,13 @@ public class AraxxorScript extends Script {
             String action = config.harvestCorpse() ? "Harvest" : "Destroy";
             Rs2Npc.interact(deadAraxxor, action);
             sleep(1200);
+            return;
+        }
+
+        // Corpse is gone — if in LOOTING state, pick up the ground items now
+        if (state == AraxxorState.LOOTING) {
+            status = "Looting...";
+            lootItems();
             return;
         }
 
@@ -1878,15 +1886,6 @@ public class AraxxorScript extends Script {
     private void lootItems() {
         togglePrayers(false);
 
-        // Check inventory space — eat food to make room
-        if (Rs2Inventory.isFull()) {
-            boolean hasFood = !Rs2Inventory.getInventoryFood().isEmpty();
-            if (hasFood) {
-                Rs2Player.eatAt(100);
-                tickSleep();
-            }
-        }
-
         LootingParameters params = new LootingParameters(
                 config.lootPriceThreshold(),
                 Integer.MAX_VALUE,
@@ -1894,34 +1893,22 @@ public class AraxxorScript extends Script {
                 1,
                 0,
                 false,
-                false
-        );
+                false);
+        params.setEatFoodForSpace(true);
 
-        // Loot valuable items
-        Rs2GroundItem.lootItemBasedOnValue(params);
+        Rs2LootEngine.with(params)
+                .withLootAction(Rs2GroundItem::coreLoot)
+                .addByValue()
+                .addCustom("araxxor-uniques",
+                        gi -> gi.getName() != null && ARAXXOR_UNIQUE_DROPS.contains(gi.getName().toLowerCase()),
+                        null)
+                .addCustom("araxxor-supplies",
+                        gi -> gi.getName() != null && ARAXXOR_SUPPLY_DROPS.contains(gi.getName().toLowerCase()),
+                        null)
+                .loot();
 
-        // Always loot unique drops
-        Rs2GroundItem.loot("Noxious point", 20);
-        Rs2GroundItem.loot("Noxious blade", 20);
-        Rs2GroundItem.loot("Noxious pommel", 20);
-        Rs2GroundItem.loot("Araxyte fang", 20);
-        Rs2GroundItem.loot("Araxyte venom sack", 20);
-        Rs2GroundItem.loot("Jar of venom", 20);
-        Rs2GroundItem.loot("Spider cave teleport", 20);
-
-        sleep(600, 1200);
-
-        // Check if done looting
-        if (!Rs2GroundItem.isItemBasedOnValueOnGround(config.lootPriceThreshold(), 20)) {
-            // Pick up supply drops (Araxxor drops food/prayer pots)
-            Rs2GroundItem.loot("Shark", 20);
-            Rs2GroundItem.loot("Prayer potion", 20);
-            Rs2GroundItem.loot("Super combat potion", 20);
-            sleep(600);
-
-            state = AraxxorState.IDLE;
-            status = "Loot complete";
-        }
+        state = AraxxorState.IDLE;
+        status = "Loot complete";
     }
 
     // ── Utility ─────────────────────────────────────────
@@ -1944,9 +1931,21 @@ public class AraxxorScript extends Script {
     }
 
     private int getHpPercent() {
-        Client client = Microbot.getClient();
-        int current = client.getBoostedSkillLevel(Skill.HITPOINTS);
-        int max = client.getRealSkillLevel(Skill.HITPOINTS);
+        int current = Rs2Player.getBoostedSkillLevel(Skill.HITPOINTS);
+        int max = Rs2Player.getRealSkillLevel(Skill.HITPOINTS);
         return max > 0 ? (current * 100) / max : 100;
+    }
+
+    /**
+     * Look up the nearest NPC with the given ID, executed on the client thread.
+     * <p>
+     * The new {@code Rs2NpcCache.query()} calls {@code worldView.npcs()} at construction
+     * time. When invoked from the script (scheduler) thread this is not guaranteed safe,
+     * so we marshal the entire query onto the client thread — matching the behaviour of
+     * the old {@code Rs2Npc.getNpcs()} which wrapped everything in
+     * {@code runOnClientThreadOptional()}.
+     */
+    private Rs2NpcModel findNearestNpc(int npcId) {
+        return Rs2Npc.getNpc(npcId);
     }
 }

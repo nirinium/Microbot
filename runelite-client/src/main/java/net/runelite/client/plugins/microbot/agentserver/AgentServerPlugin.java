@@ -133,6 +133,7 @@ public class AgentServerPlugin extends Plugin {
 				new WidgetClickHandler(gson),
 				new StateHandler(gson, client),
 				new InventoryHandler(gson),
+				new EquipmentHandler(gson),
 				new NpcHandler(gson, maxResults),
 				new ObjectHandler(gson, maxResults),
 				new WalkHandler(gson),

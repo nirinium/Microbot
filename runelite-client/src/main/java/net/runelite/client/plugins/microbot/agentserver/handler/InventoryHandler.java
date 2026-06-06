@@ -35,6 +35,9 @@ public class InventoryHandler extends AgentHandler {
 			case "/drop":
 				handleDrop(exchange);
 				break;
+			case "/move":
+				handleMove(exchange);
+				break;
 			default:
 				sendJson(exchange, 404, errorResponse("Unknown path: /inventory" + sub));
 		}
@@ -138,6 +141,55 @@ public class InventoryHandler extends AgentHandler {
 		response.put("success", success);
 		response.put("name", name);
 		response.put("droppedAll", Boolean.TRUE.equals(all));
+		sendJson(exchange, 200, response);
+	}
+
+	private void handleMove(HttpExchange exchange) throws IOException {
+		try {
+			requirePost(exchange);
+		} catch (HttpMethodException e) {
+			sendJson(exchange, 405, errorResponse(e.getMessage()));
+			return;
+		}
+
+		Map<String, Object> body;
+		try {
+			body = readJsonBody(exchange);
+		} catch (Exception e) {
+			sendJson(exchange, 400, errorResponse("Invalid JSON body"));
+			return;
+		}
+
+		Number slotNum = (Number) body.get("slot");
+		if (slotNum == null) {
+			sendJson(exchange, 400, errorResponse("Missing required field: slot"));
+			return;
+		}
+		int targetSlot = slotNum.intValue();
+
+		String name = (String) body.get("name");
+		Number fromSlotNum = (Number) body.get("fromSlot");
+
+		Rs2ItemModel item = null;
+		if (fromSlotNum != null) {
+			final int fromSlot = fromSlotNum.intValue();
+			item = Rs2Inventory.get(i -> i.getSlot() == fromSlot);
+		} else if (name != null && !name.isEmpty()) {
+			item = Rs2Inventory.get(name);
+		}
+
+		if (item == null) {
+			sendJson(exchange, 404, errorResponse("Item not found"));
+			return;
+		}
+
+		boolean success = Rs2Inventory.moveItemToSlot(item, targetSlot);
+
+		Map<String, Object> response = new LinkedHashMap<>();
+		response.put("success", success);
+		response.put("name", item.getName());
+		response.put("fromSlot", item.getSlot());
+		response.put("toSlot", targetSlot);
 		sendJson(exchange, 200, response);
 	}
 

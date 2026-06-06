@@ -320,7 +320,19 @@ public class Rs2GroundItem {
 
 
     private static Predicate<GroundItem> baseRangeAndOwnershipFilter(LootingParameters params) {
-        final WorldPoint me = Rs2Player.getWorldLocation();
+        // GroundItemsPlugin stores items at tile.getWorldLocation() which uses the worldview's
+        // base coordinates. In instanced areas the base is the instance-space origin (6400+),
+        // so stored locations are instance-space. Rs2Player.getWorldLocation() projects those
+        // back to the overworld template, producing a mismatch that makes the distance check
+        // fail for every item. Use the raw localPlayer.getWorldLocation() in instances so both
+        // sides of the comparison are in the same (instance-space) coordinate system.
+        final WorldPoint me = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            if (Microbot.getClient().getTopLevelWorldView().isInstance()) {
+                Player p = Microbot.getClient().getLocalPlayer();
+                return p != null ? p.getWorldLocation() : null;
+            }
+            return Rs2Player.getWorldLocation();
+        }).orElseGet(Rs2Player::getWorldLocation);
         if (me == null) return gi -> false;
         final boolean anti = params.isAntiLureProtection();
         return gi ->

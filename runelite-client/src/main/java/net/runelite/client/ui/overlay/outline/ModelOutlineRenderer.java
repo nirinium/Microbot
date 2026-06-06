@@ -38,6 +38,7 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
+import net.runelite.api.NPC;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
 import net.runelite.api.GraphicsObject;
@@ -979,6 +980,15 @@ public class ModelOutlineRenderer
 		{
 			freeAllBlockMemory();
 		}
+	}
+
+	/**
+	 * Compatibility bridge for external plugins compiled against a NPC-specific overload.
+	 * NPC extends Actor, so this delegates directly.
+	 */
+	public void drawOutline(NPC npc, int outlineWidth, Color color, int feather)
+	{
+		drawOutline((Actor) npc, outlineWidth, color, feather);
 	}
 
 	public void drawOutline(Actor actor, int outlineWidth, Color color, int feather)

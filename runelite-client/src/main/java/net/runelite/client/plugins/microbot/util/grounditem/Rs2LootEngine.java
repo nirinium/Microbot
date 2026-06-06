@@ -1,6 +1,7 @@
 package net.runelite.client.plugins.microbot.util.grounditem;
 
 import net.runelite.api.ItemID;
+import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.grounditems.GroundItem;
 import net.runelite.client.plugins.microbot.Microbot;
@@ -206,7 +207,18 @@ public final class Rs2LootEngine {
     // ------------------ shared helpers (same logic as before) ------------------
 
     private static Predicate<GroundItem> baseRangeAndOwnershipFilter(LootingParameters params) {
-        final WorldPoint me = Rs2Player.getWorldLocation();
+        // GroundItemsPlugin stores items at tile.getWorldLocation() which uses instance-space
+        // coordinates in instanced areas. Rs2Player.getWorldLocation() returns overworld template
+        // coordinates in instances, causing a massive distance mismatch. Use raw
+        // localPlayer.getWorldLocation() in instances to keep both sides in the same space.
+        final WorldPoint me = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            if (Microbot.getClient().getTopLevelWorldView().isInstance()) {
+                Player p = Microbot.getClient().getLocalPlayer();
+                return p != null ? p.getWorldLocation() : null;
+            }
+            return Rs2Player.getWorldLocation();
+        }).orElseGet(Rs2Player::getWorldLocation);
+        if (me == null) return gi -> false;
         final boolean anti = params.isAntiLureProtection();
         return gi ->
                 gi.getLocation().distanceTo(me) < params.getRange()

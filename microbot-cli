@@ -47,6 +47,7 @@ Widget Commands:
 
 Game State:
   state                                  Current game state and player info
+  equipment                              Currently equipped items with slot names
   skills [--name Attack]                 Skill levels and XP
   varbit <id>                            Read a varbit value
   varp <id>                              Read a varp (player variable) value
@@ -279,6 +280,10 @@ case "$1" in
         do_get "${BASE}/state"
         ;;
 
+    equipment)
+        do_get "${BASE}/equipment"
+        ;;
+
     skills)
         shift
         name=""
@@ -307,6 +312,11 @@ case "$1" in
                 all="false"
                 [[ $# -ge 4 ]] && [[ "$4" == "--all" ]] && all="true"
                 do_post "${BASE}/inventory/drop" "{\"name\":\"${escaped_name}\",\"all\":${all}}"
+                ;;
+            move)
+                [[ $# -lt 4 ]] && { echo '{"error":"Usage: microbot-cli inventory move <name> <slot>"}'; exit 1; }
+                escaped_name=$(json_escape "$3")
+                do_post "${BASE}/inventory/move" "{\"name\":\"${escaped_name}\",\"slot\":$4}"
                 ;;
             *) usage ;;
         esac

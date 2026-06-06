@@ -718,7 +718,7 @@ public class OverlayRenderer extends MouseAdapter
 		{
 			overlayDimension = overlay.render(graphics);
 		}
-		catch (Exception ex)
+		catch (Throwable ex)
 		{
 			log.warn(DEDUPLICATE, "Error during overlay rendering", ex);
 			return;

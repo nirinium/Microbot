@@ -139,7 +139,9 @@ import static java.nio.file.StandardCopyOption.COPY_ATTRIBUTES;
 @Slf4j
 public class RuneLite
 {
-	public static final File RUNELITE_DIR = new File(System.getProperty("user.home"), ".runelite");
+	public static final File RUNELITE_DIR = new File(
+		System.getProperty("runelite.dir",
+			new File(System.getProperty("user.home"), ".runelite").getAbsolutePath()));
 	public static final File CACHE_DIR = new File(RUNELITE_DIR, "cache");
 	public static final File PLUGINS_DIR = new File(RUNELITE_DIR, "plugins");
 	public static final File SCREENSHOT_DIR = new File(RUNELITE_DIR, "screenshots");
@@ -657,7 +659,7 @@ public class RuneLite
 	private static void copyJagexCache()
 	{
 		Path from = Paths.get(System.getProperty("user.home"), "jagexcache");
-		Path to = Paths.get(System.getProperty("user.home"), ".runelite", "jagexcache");
+		Path to = RUNELITE_DIR.toPath().resolve("jagexcache");
 		if (Files.exists(to) || !Files.exists(from))
 		{
 			return;

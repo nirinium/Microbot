@@ -75,6 +75,21 @@ tasks.register<JavaExec>("run") {
     jvmArgs(macEawtJvmArgs)
 }
 
+tasks.register<JavaExec>("runIsolated") {
+    group = "application"
+    description = "Run Microbot with an isolated data directory (~/.microbot), separate from the stock RuneLite profile"
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("net.runelite.client.RuneLite")
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-ea",
+        "-Drunelite.dir=${System.getProperty("user.home")}/.microbot"
+    )
+    jvmArgs(macEawtJvmArgs)
+}
+
 tasks.register<JavaExec>("seedMenuActionInfo") {
     group = "verification"
     description = "Generate src/main/resources/.../menu-action-info.properties from the injected-client jar. Re-run when the injected-client dependency bumps."

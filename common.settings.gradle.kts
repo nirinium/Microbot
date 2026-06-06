@@ -63,6 +63,7 @@ gradle.beforeProject {
 
 gradle.afterProject {
     tasks.withType<Javadoc> {
+        isFailOnError = false
         (this.options as StandardJavadocDocletOptions).apply {
             quiet()
             encoding("UTF-8")

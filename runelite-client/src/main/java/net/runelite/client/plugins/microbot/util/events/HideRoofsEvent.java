@@ -12,6 +12,16 @@ public class HideRoofsEvent implements BlockingEvent
 	@Override
 	public boolean validate()
 	{
+		// Don't attempt to hide rooftops inside instanced regions (dungeons, boss instances).
+		// There are no rooftops to hide there, the varbit may read 0 by game design,
+		// and retrying would permanently block all scripts.
+		Boolean inInstance = Microbot.getClientThread()
+				.runOnClientThreadOptional(() -> Microbot.getClient().isInInstancedRegion())
+				.orElse(false);
+		if (inInstance)
+		{
+			return false;
+		}
 		return isConfigEnabled() && Microbot.isLoggedIn() && !Rs2Settings.isHideRoofsEnabled();
 	}
 
