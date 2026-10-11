@@ -7,8 +7,6 @@ import net.runelite.api.TileObject;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.shortestpath.ShortestPathPlugin;
-import net.runelite.client.plugins.microbot.shortestpath.pathfinder.Pathfinder;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2BankID;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
@@ -18,6 +16,9 @@ import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
+import net.runelite.client.plugins.microbot.util.walker.Rs2RouteRequest;
+import net.runelite.client.plugins.microbot.util.walker.Rs2RouteResult;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 
@@ -33,7 +34,7 @@ import static net.runelite.client.plugins.microbot.util.Global.*;
 public class Rs2DepositBox {
 
     private static final int DEPOSITBOX_PARENT_WIDGET_ID = 192;
-    private static final int DEPOSITBOX_INVENTORY_ITEM_CONTAINER_COMPONENT_ID = 12582935;
+    private static final int DEPOSITBOX_INVENTORY_ITEM_CONTAINER_COMPONENT_ID = 12582936;
 
     /**
      * Checks if the deposit box interface is open.
@@ -132,6 +133,7 @@ public class Rs2DepositBox {
         for (Rs2ItemModel item : items) {
             if (item == null) continue;
             invokeMenu(6, item);
+            sleepUntil(() -> !Rs2Inventory.hasItem(item.getId()), 2500);
             result = true;
         }
         return result;
@@ -144,7 +146,8 @@ public class Rs2DepositBox {
      * @return {@code true} if at least one item was deposited, {@code false} otherwise
      */
     public static boolean depositAllExcept(Integer... ids) {
-        return depositAll(x -> Arrays.stream(ids).noneMatch(id -> id == x.getId()));
+        Set<Integer> idSet = new HashSet<>(Arrays.asList(ids));
+        return depositAll(x -> !idSet.contains(x.getId()));
     }
 
 
@@ -155,7 +158,8 @@ public class Rs2DepositBox {
      * @return {@code true} if at least one item was deposited, {@code false} otherwise
      */
     public static boolean depositAllExcept(String... names) {
-        return depositAll(x -> Arrays.stream(names).noneMatch(name -> x.getName().equalsIgnoreCase(name)));
+        Set<String> nameSet = Arrays.stream(names).map(String::toLowerCase).collect(Collectors.toSet());
+        return depositAll(x -> !nameSet.contains(x.getName().toLowerCase()));
     }
 
     /**
@@ -211,7 +215,8 @@ public class Rs2DepositBox {
      * @return {@code true} if any items were deposited, {@code false} otherwise
      */
     public static boolean depositAll(Integer... ids) {
-        return depositAll(x -> Arrays.stream(ids).anyMatch(id -> id == x.getId()));
+        Set<Integer> idSet = new HashSet<>(Arrays.asList(ids));
+        return depositAll(x -> idSet.contains(x.getId()));
     }
 
 
@@ -222,7 +227,8 @@ public class Rs2DepositBox {
      * @return {@code true} if any items were deposited, {@code false} otherwise
      */
     public static boolean depositAll(String... names) {
-        return depositAll(x -> Arrays.stream(names).anyMatch(name -> x.getName().equalsIgnoreCase(name)));
+        Set<String> nameSet = Arrays.stream(names).map(String::toLowerCase).collect(Collectors.toSet());
+        return depositAll(x -> nameSet.contains(x.getName().toLowerCase()));
     }
 
     /**
@@ -416,7 +422,7 @@ public class Rs2DepositBox {
      * @return the nearest {@link DepositBoxLocation}, or {@code null} if no accessible deposit box was found
      */
     public static DepositBoxLocation getNearestDepositBox() {
-        return getNearestDepositBox(Microbot.getClient().getLocalPlayer().getWorldLocation());
+        return getNearestDepositBox(Rs2Player.getWorldLocation());
     }
 
     /**
@@ -457,8 +463,9 @@ public class Rs2DepositBox {
             return null;
         }
 
-        if (Objects.equals(Microbot.getClient().getLocalPlayer().getWorldLocation(), worldPoint)) {
-            List<TileObject> bankObjs = List.of(Rs2GameObject.findDepositBox(maxObjectSearchRadius));
+        if (Objects.equals(Rs2Player.getWorldLocation(), worldPoint)) {
+            GameObject depositBoxObj = Rs2GameObject.findDepositBox(maxObjectSearchRadius);
+            List<TileObject> bankObjs = depositBoxObj != null ? List.of(depositBoxObj) : List.of();
 
             Optional<DepositBoxLocation> byObject = bankObjs.stream()
                     .map(obj -> {
@@ -486,14 +493,8 @@ public class Rs2DepositBox {
                 .map(DepositBoxLocation::getWorldPoint)
                 .collect(Collectors.toSet());
 
-        if (ShortestPathPlugin.getPathfinderConfig().getTransports().isEmpty()) {
-            ShortestPathPlugin.getPathfinderConfig().refresh();
-        }
-
-        Pathfinder pf = new Pathfinder(ShortestPathPlugin.getPathfinderConfig(), worldPoint, targets);
-        pf.run();
-
-        List<WorldPoint> path = pf.getPath();
+        Rs2RouteResult route = Rs2PathApi.plan(Rs2RouteRequest.toAny(worldPoint, targets));
+        List<WorldPoint> path = route.getPath();
         if (path.isEmpty()) {
             Microbot.log("Unable to find path to any deposit box");
             return null;
@@ -524,7 +525,7 @@ public class Rs2DepositBox {
         Rs2Player.toggleRunEnergy(true);
         Microbot.status = "Walking to nearest deposit box " + depositBoxLocation.name();
         Rs2Walker.walkTo(depositBoxLocation.getWorldPoint(), 4);
-        return depositBoxLocation.getWorldPoint().distanceTo2D(Microbot.getClient().getLocalPlayer().getWorldLocation()) <= 4;
+        return depositBoxLocation.getWorldPoint().distanceTo2D(Rs2Player.getWorldLocation()) <= 4;
     }
     
     /**
@@ -555,7 +556,7 @@ public class Rs2DepositBox {
         if (isOpen()) return true;
         Rs2Player.toggleRunEnergy(true);
         Microbot.status = "Walking to nearest deposit box " + depositBoxLocation.name();
-        boolean result = depositBoxLocation.getWorldPoint().distanceTo(Microbot.getClient().getLocalPlayer().getWorldLocation()) <= 8;
+        boolean result = depositBoxLocation.getWorldPoint().distanceTo(Rs2Player.getWorldLocation()) <= 8;
         if (result) {
             return openDepositBox();
         } else {

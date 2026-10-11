@@ -27,6 +27,21 @@ package net.runelite.client.plugins.gpu;
 import com.google.common.base.Stopwatch;
 import com.google.common.primitives.Ints;
 import com.google.inject.Provides;
+import java.awt.Canvas;
+import java.awt.Dimension;
+import java.awt.GraphicsConfiguration;
+import java.awt.Image;
+import java.awt.geom.AffineTransform;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
@@ -43,6 +58,7 @@ import net.runelite.api.TextureProvider;
 import net.runelite.api.TileObject;
 import net.runelite.api.WorldEntity;
 import net.runelite.api.WorldView;
+import net.runelite.api.events.CommandExecuted;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.PostClientTick;
 import net.runelite.api.hooks.DrawCallbacks;
@@ -74,19 +90,6 @@ import org.lwjgl.opengl.GLCapabilities;
 import org.lwjgl.opengl.GLUtil;
 import org.lwjgl.system.Callback;
 import org.lwjgl.system.Configuration;
-
-import javax.annotation.Nonnull;
-import javax.inject.Inject;
-import javax.swing.*;
-import java.awt.*;
-import java.awt.geom.AffineTransform;
-import java.awt.image.BufferedImage;
-import java.awt.image.DataBufferInt;
-import java.nio.*;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CountDownLatch;
 
 @PluginDescriptor(
 	name = "GPU",
@@ -175,15 +178,21 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 
 	private int cameraYaw, cameraPitch;
 
-	private VAOList vaoO;
-	private VAOList vaoA;
-	private VAOList vaoPO;
+	static class RenderThread
+	{
+		VAOList vaoO, vaoA;
+		float[] tmp = new float[3];
+		ModelUploader modelUploader;
+	}
+
+	private RenderThread[] rts;
 
 	private SceneUploader clientUploader, mapUploader;
-	private FacePrioritySorter facePrioritySorter;
 
 	static class SceneContext
 	{
+		final float[] projection = Mat4.identity();
+
 		final int sizeX, sizeZ;
 		Zone[][] zones;
 
@@ -220,7 +229,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	SceneContext context(Scene scene)
 	{
 		int wvid = scene.getWorldViewId();
-		if (wvid == -1)
+		if (wvid == WorldView.TOPLEVEL)
 		{
 			return root;
 		}
@@ -230,7 +239,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	SceneContext context(WorldView wv)
 	{
 		int wvid = wv.getId();
-		if (wvid == -1)
+		if (wvid == WorldView.TOPLEVEL)
 		{
 			return root;
 		}
@@ -250,7 +259,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	private int uniExpandedMapLoadingChunks;
 	private int uniSmoothBanding;
 	private int uniWorldProj;
-	private static int uniEntityProj;
+	static int uniEntityProj;
 	static int uniEntityTint;
 	private int uniBrightness;
 	private int uniTex;
@@ -262,18 +271,26 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	private int uniBlockMain;
 	private int uniTextureLightMode;
 	private int uniTick;
+	private int uniColorblindIntensity;
+	private int uniUiColorblindIntensity;
 	static int uniBase;
 
-	private static Projection lastProjection;
+	static final float[] IDENTITY = Mat4.identity();
 
 	@Override
 	protected void startUp()
 	{
 		root = new SceneContext(NUM_ZONES, NUM_ZONES);
 		subs = new SceneContext[MAX_WORLDVIEWS];
+		int numThreads = config.numThreads();
+		rts = new RenderThread[numThreads + 1];
+		for (int i = 0; i < rts.length; ++i)
+		{
+			var rt = rts[i] = new RenderThread();
+			rt.modelUploader = new ModelUploader();
+		}
 		clientUploader = new SceneUploader(renderCallbackManager);
 		mapUploader = new SceneUploader(renderCallbackManager);
-		facePrioritySorter = new FacePrioritySorter(clientUploader);
 		clientThread.invoke(() ->
 		{
 			try
@@ -354,10 +371,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 				}
 
 				client.setDrawCallbacks(this);
-				client.setGpuFlags(DrawCallbacks.GPU
-					| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
-					| DrawCallbacks.ZBUF
-				);
+				setupGpuFlags();
 				client.setExpandedMapLoading(config.expandedMapLoadingZones());
 
 				// force rebuild of main buffer provider to enable alpha channel
@@ -397,6 +411,18 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			}
 			return true;
 		});
+	}
+
+	private void setupGpuFlags()
+	{
+		int cpus = Runtime.getRuntime().availableProcessors();
+		int threads = Math.min(cpus - 1, config.numThreads());
+		log.debug("Using {} render threads", threads);
+		client.setGpuFlags(DrawCallbacks.GPU
+			| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
+			| DrawCallbacks.ZBUF
+			| DrawCallbacks.RENDER_THREADS(threads)
+		);
 	}
 
 	private void startupWorldLoad()
@@ -493,10 +519,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			else if (configChanged.getKey().equals("removeVertexSnapping"))
 			{
 				log.debug("Toggle {}", configChanged.getKey());
-				client.setGpuFlags(DrawCallbacks.GPU
-					| (config.removeVertexSnapping() ? DrawCallbacks.NO_VERTEX_SNAPPING : 0)
-					| DrawCallbacks.ZBUF
-				);
+				setupGpuFlags();
 			}
 			else if (configChanged.getKey().equals("uiScalingMode") || configChanged.getKey().equals("colorBlindMode"))
 			{
@@ -505,6 +528,30 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 					log.debug("Recompiling shaders");
 					shutdownProgram();
 					initProgram();
+				});
+			}
+			else if (configChanged.getKey().equals("numThreads"))
+			{
+				clientThread.invokeLater(() ->
+				{
+					for (int i = 0; i < rts.length; ++i) // NOPMD: ForLoopCanBeForeach
+					{
+						rts[i].vaoO.free();
+						rts[i].vaoA.free();
+					}
+
+					int numThreads = config.numThreads();
+					rts = new RenderThread[numThreads + 1];
+					for (int i = 0; i < rts.length; ++i)
+					{
+						var rt = new RenderThread();
+						rt.modelUploader = new ModelUploader();
+						rt.vaoO = new VAOList(i > 0);
+						rt.vaoA = new VAOList(i > 0);
+						rts[i] = rt;
+					}
+
+					setupGpuFlags();
 				});
 			}
 		}
@@ -596,11 +643,13 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		uniTextures = glGetUniformLocation(glProgram, "textures");
 		uniTextureAnimations = glGetUniformLocation(glProgram, "textureAnimations");
 		uniBase = glGetUniformLocation(glProgram, "base");
+		uniColorblindIntensity = glGetUniformLocation(glProgram, "colorblindIntensity");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
 		uniTexTargetDimensions = glGetUniformLocation(glUiProgram, "targetDimensions");
 		uniTexSourceDimensions = glGetUniformLocation(glUiProgram, "sourceDimensions");
 		uniUiAlphaOverlay = glGetUniformLocation(glUiProgram, "alphaOverlay");
+		uniUiColorblindIntensity = glGetUniformLocation(glUiProgram, "colorblindIntensity");
 	}
 
 	private void shutdownProgram()
@@ -660,9 +709,11 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		initGlBuffer(glUniformBuffer);
 		Zone.initBuffer();
 
-		vaoO = new VAOList();
-		vaoA = new VAOList();
-		vaoPO = new VAOList();
+		for (int i = 0; i < rts.length; ++i)
+		{
+			rts[i].vaoO = new VAOList(i > 0);
+			rts[i].vaoA = new VAOList(i > 0);
+		}
 	}
 
 	private void initGlBuffer(GLBuffer glBuffer)
@@ -676,19 +727,19 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		uniformBuffer = null;
 		Zone.freeBuffer();
 
-		if (vaoO != null)
+		for (int i = 0; i < rts.length; ++i) // NOPMD: ForLoopCanBeForeach
 		{
-			vaoO.free();
+			if (rts[i].vaoO != null)
+			{
+				rts[i].vaoO.free();
+				rts[i].vaoO = null;
+			}
+			if (rts[i].vaoA != null)
+			{
+				rts[i].vaoA.free();
+				rts[i].vaoA = null;
+			}
 		}
-		if (vaoA != null)
-		{
-			vaoA.free();
-		}
-		if (vaoPO != null)
-		{
-			vaoPO.free();
-		}
-		vaoO = vaoA = vaoPO = null;
 	}
 
 	private void destroyGlBuffer(GLBuffer glBuffer)
@@ -786,44 +837,41 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
-	static void updateEntityProjection(Projection projection)
-	{
-		if (lastProjection != projection)
-		{
-			float[] p = projection instanceof FloatProjection ? ((FloatProjection) projection).getProjection() : Mat4.identity();
-			glUniformMatrix4fv(uniEntityProj, false, p);
-			lastProjection = projection;
-		}
-	}
-
 	@Override
-	public void preSceneDraw(Scene scene,
+	public void preSceneDraw(Scene scene, Projection entityProjection,
 		float cameraX, float cameraY, float cameraZ, float cameraPitch, float cameraYaw,
 		int minLevel, int level, int maxLevel, Set<Integer> hideRoofIds)
 	{
 		SceneContext ctx = context(scene);
-		if (ctx != null)
+		if (ctx == null)
 		{
-			ctx.cameraX = (int) cameraX;
-			ctx.cameraY = (int) cameraY;
-			ctx.cameraZ = (int) cameraZ;
-			ctx.minLevel = minLevel;
-			ctx.level = level;
-			ctx.maxLevel = maxLevel;
-			ctx.hideRoofIds = hideRoofIds;
+			return;
 		}
+
+		ctx.cameraX = (int) cameraX;
+		ctx.cameraY = (int) cameraY;
+		ctx.cameraZ = (int) cameraZ;
+		ctx.minLevel = minLevel;
+		ctx.level = level;
+		ctx.maxLevel = maxLevel;
+		ctx.hideRoofIds = hideRoofIds;
 
 		if (scene.getWorldViewId() == WorldView.TOPLEVEL)
 		{
+			for (int i = 0; i < rts.length; ++i) // NOPMD: ForLoopCanBeForeach
+			{
+				rts[i].vaoO.map();
+				rts[i].vaoA.map();
+			}
+
 			this.cameraYaw = client.getCameraYaw();
 			this.cameraPitch = client.getCameraPitch();
 			preSceneDrawToplevel(scene, cameraX, cameraY, cameraZ, cameraPitch, cameraYaw);
 		}
 		else
 		{
-			Scene toplevel = client.getScene();
-			vaoO.addRange(null, toplevel);
-			vaoPO.addRange(null, toplevel);
+			System.arraycopy(((FloatProjection) entityProjection).getProjection(), 0, ctx.projection, 0, 16);
+			glUniformMatrix4fv(uniEntityProj, false, ctx.projection);
 			glUniform4i(uniEntityTint, scene.getOverrideHue(), scene.getOverrideSaturation(), scene.getOverrideLuminance(), scene.getOverrideAmount());
 		}
 	}
@@ -892,12 +940,6 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fboScene);
 		}
 
-		// Clear scene
-		int sky = client.getSkyboxColor();
-		glClearColor((sky >> 16 & 0xFF) / 255f, (sky >> 8 & 0xFF) / 255f, (sky & 0xFF) / 255f, 1f);
-		glClearDepth(0d);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
 		// Setup anisotropic filtering
 		final int anisotropicFilteringLevel = config.anisotropicFilteringLevel();
 
@@ -940,11 +982,13 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		// Setup uniforms
 		final int drawDistance = getDrawDistance();
 		final int fogDepth = config.fogDepth();
+		final int sky = client.getSkyboxColor();
 		glUniform1i(uniUseFog, fogDepth > 0 ? 1 : 0);
 		glUniform4f(uniFogColor, (sky >> 16 & 0xFF) / 255f, (sky >> 8 & 0xFF) / 255f, (sky & 0xFF) / 255f, 1f);
 		glUniform1i(uniFogDepth, fogDepth);
 		glUniform1i(uniDrawDistance, drawDistance * Perspective.LOCAL_TILE_SIZE);
 		glUniform1i(uniExpandedMapLoadingChunks, client.getExpandedMapLoading());
+		glUniform1f(uniColorblindIntensity, config.colorBlindIntensity());
 
 		// Brightness happens to also be stored in the texture provider, so we use that
 		TextureProvider textureProvider = client.getTextureProvider();
@@ -965,8 +1009,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		Mat4.mul(projectionMatrix, Mat4.translate(-cameraX, -cameraY, -cameraZ));
 		glUniformMatrix4fv(uniWorldProj, false, projectionMatrix);
 
-		projectionMatrix = Mat4.identity();
-		glUniformMatrix4fv(uniEntityProj, false, projectionMatrix);
+		glUniformMatrix4fv(uniEntityProj, false, IDENTITY);
 
 		glUniform4i(uniEntityTint, 0, 0, 0, 0);
 
@@ -985,7 +1028,37 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		glDepthFunc(GL_GREATER);
 		glEnable(GL_DEPTH_TEST);
 
+		drawSkybox(scene, sky, cameraX, cameraY, cameraZ);
+
 		checkGLErrors();
+	}
+
+	private void drawSkybox(Scene scene, int sky, float cameraX, float cameraY, float cameraZ)
+	{
+		Model skybox = scene.getSkybox();
+		if (skybox == null)
+		{
+			glClearColor((sky >> 16 & 0xFF) / 255f, (sky >> 8 & 0xFF) / 255f, (sky & 0xFF) / 255f, 1f);
+			glClearDepth(0d);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			return;
+		}
+
+		glClearColor(0f, 0f, 0f, 1f);
+		glClearDepth(0d);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		int size = skybox.getFaceCount() * 3 * VAO.VERT_SIZE;
+		RenderThread rt = rts[0];
+		VAO o = rt.vaoO.get(size);
+		rt.modelUploader.uploadTempModel(skybox, 0, 0, 0, 0, o.vbo.vb);
+
+		float[] skyboxProjection = Mat4.translate(cameraX, cameraY, cameraZ);
+		o.addRange(skyboxProjection, scene, Renderable.RENDERMODE_UNSORTED_NO_DEPTH);
+
+		rt.vaoO.draw();
+
+		glUniformMatrix4fv(uniEntityProj, false, IDENTITY);
 	}
 
 	@Override
@@ -998,6 +1071,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		else
 		{
 			glUniform4i(uniEntityTint, 0, 0, 0, 0);
+			glUniformMatrix4fv(uniEntityProj, false, IDENTITY);
 		}
 	}
 
@@ -1037,8 +1111,6 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void drawZoneOpaque(Projection entityProjection, Scene scene, int zx, int zz)
 	{
-		updateEntityProjection(entityProjection);
-
 		SceneContext ctx = context(scene);
 		if (ctx == null)
 		{
@@ -1051,7 +1123,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 
-		int offset = scene.getWorldViewId() == -1 ? (SCENE_OFFSET >> 3) : 0;
+		int offset = scene.getWorldViewId() == WorldView.TOPLEVEL ? (SCENE_OFFSET >> 3) : 0;
 		z.renderOpaque(zx - offset, zz - offset, ctx.minLevel, ctx.level, ctx.maxLevel, ctx.hideRoofIds);
 
 		checkGLErrors();
@@ -1068,19 +1140,13 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 
-		// this is a noop after the first zone
-		vaoA.unmap();
-
 		Zone z = ctx.zones[zx][zz];
 		if (!z.initialized)
 		{
 			return;
 		}
 
-		updateEntityProjection(entityProjection);
-		glUniform4i(uniEntityTint, scene.getOverrideHue(), scene.getOverrideSaturation(), scene.getOverrideLuminance(), scene.getOverrideAmount());
-
-		int offset = scene.getWorldViewId() == -1 ? (SCENE_OFFSET >> 3) : 0;
+		int offset = scene.getWorldViewId() == WorldView.TOPLEVEL ? (SCENE_OFFSET >> 3) : 0;
 		int dx = ctx.cameraX - ((zx - offset) << 10);
 		int dz = ctx.cameraZ - ((zz - offset) << 10);
 		boolean close = dx * dx + dz * dz < ALPHA_ZSORT_CLOSE * ALPHA_ZSORT_CLOSE;
@@ -1091,7 +1157,8 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			z.multizoneLocs(scene, zx - offset, zz - offset, ctx.cameraX, ctx.cameraZ, ctx.zones);
 		}
 
-		z.renderAlpha(zx - offset, zz - offset, cameraYaw, cameraPitch, ctx.minLevel, ctx.level, ctx.maxLevel, level, ctx.hideRoofIds, !close || (scene.getOverrideAmount() > 0));
+		RenderThread rt = rts[0];
+		z.renderAlpha(rt.modelUploader, zx - offset, zz - offset, cameraYaw, cameraPitch, ctx.minLevel, ctx.level, ctx.maxLevel, level, ctx.hideRoofIds, !close || (scene.getOverrideAmount() > 0));
 
 		checkGLErrors();
 	}
@@ -1105,45 +1172,18 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 
-		updateEntityProjection(projection);
-
 		if (pass == DrawCallbacks.PASS_OPAQUE)
 		{
-			vaoO.addRange(projection, scene);
-			vaoPO.addRange(projection, scene);
-
-			if (scene.getWorldViewId() == -1)
+			if (scene.getWorldViewId() == WorldView.TOPLEVEL)
 			{
-				glUniform3i(uniBase, 0, 0, 0);
-
-				int sz = vaoO.unmap();
-				for (int i = 0; i < sz; ++i)
+				for (int i = 0; i < rts.length; ++i) // NOPMD: ForLoopCanBeForeach
 				{
-					VAO vao = vaoO.vaos.get(i);
-					vao.draw();
-					vao.reset();
+					rts[i].vaoO.draw();
 				}
-
-				sz = vaoPO.unmap();
-				if (sz > 0)
-				{
-					glDepthMask(false);
-					for (int i = 0; i < sz; ++i)
-					{
-						VAO vao = vaoPO.vaos.get(i);
-						vao.draw();
-					}
-					glDepthMask(true);
-
-					glColorMask(false, false, false, false);
-					for (int i = 0; i < sz; ++i)
-					{
-						VAO vao = vaoPO.vaos.get(i);
-						vao.draw();
-						vao.reset();
-					}
-					glColorMask(true, true, true, true);
-				}
+			}
+			else
+			{
+				glUniformMatrix4fv(uniEntityProj, false, IDENTITY);
 			}
 		}
 		else if (pass == DrawCallbacks.PASS_ALPHA)
@@ -1157,12 +1197,22 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 				}
 			}
 		}
+		else if (pass == DrawCallbacks.PRE_PASS_ALPHA)
+		{
+			for (int i = 0; i < rts.length; ++i)
+			{
+				rts[i].vaoA.unmap();
+			}
+
+			glUniformMatrix4fv(uniEntityProj, false, ctx.projection);
+			glUniform4i(uniEntityTint, scene.getOverrideHue(), scene.getOverrideSaturation(), scene.getOverrideLuminance(), scene.getOverrideAmount());
+		}
 
 		checkGLErrors();
 	}
 
 	@Override
-	public void drawDynamic(Projection worldProjection, Scene scene, TileObject tileObject, Renderable r, Model m, int orient, int x, int y, int z)
+	public void drawDynamic(int renderThreadId, Projection worldProjection, Scene scene, TileObject tileObject, Renderable r, Model m, int orient, int x, int y, int z)
 	{
 		SceneContext ctx = context(scene);
 		if (ctx == null)
@@ -1178,17 +1228,34 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		int size = m.getFaceCount() * 3 * VAO.VERT_SIZE;
 		if (m.getFaceTransparencies() == null)
 		{
-			VAO o = vaoO.get(size);
-			clientUploader.uploadTempModel(m, orient, x, y, z, o.vbo.vb);
+			RenderThread rt = rts[renderThreadId + 1];
+			VAO o = rt.vaoO.get(size);
+			if (o == null)
+			{
+				return;
+			}
+
+			rt.modelUploader.uploadTempModel(m, orient, x, y, z, o.vbo.vb);
+			o.addRange(ctx.projection, scene, 0);
 		}
 		else
 		{
 			m.calculateBoundsCylinder();
-			VAO o = vaoO.get(size), a = vaoA.get(size);
+
+			RenderThread rt = rts[renderThreadId + 1];
+			VAO o = rt.vaoO.get(size);
+			VAO a = rt.vaoA.get(size);
+			if (o == null || a == null)
+			{
+				return;
+			}
+
+			ModelUploader sorter = rt.modelUploader;
+
 			int start = a.vbo.vb.position();
 			try
 			{
-				facePrioritySorter.uploadSortedModel(worldProjection, m, orient, x, y, z, o.vbo.vb, a.vbo.vb);
+				sorter.uploadSortedModel(rt, worldProjection, m, orient, x, y, z, o.vbo.vb, a.vbo.vb, false);
 			}
 			catch (Exception ex)
 			{
@@ -1196,9 +1263,11 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			}
 			int end = a.vbo.vb.position();
 
+			o.addRange(ctx.projection, scene, 0);
+
 			if (end > start)
 			{
-				int offset = scene.getWorldViewId() == -1 ? SCENE_OFFSET : 0;
+				int offset = scene.getWorldViewId() == WorldView.TOPLEVEL ? SCENE_OFFSET : 0;
 				int zx = (x >> 10) + (offset >> 3);
 				int zz = (z >> 10) + (offset >> 3);
 				Zone zone = ctx.zones[zx][zz];
@@ -1229,19 +1298,18 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		Renderable renderable = gameObject.getRenderable();
 		int size = m.getFaceCount() * 3 * VAO.VERT_SIZE;
 		int renderMode = renderable.getRenderMode();
-		if (renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH || m.getFaceTransparencies() != null)
+		if (renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH || m.getFaceTransparencies() != null || m.getTransparency() != 0)
 		{
-			// opaque player faces have their own vao and are drawn in a separate pass from normal opaque faces
-			// because they are not depth tested. transparent player faces don't need their own vao because normal
-			// transparent faces are already not depth tested
-			VAO o = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH ? vaoPO.get(size) : vaoO.get(size);
-			VAO a = vaoA.get(size);
+			RenderThread rt = rts[0];
+			VAO o = rt.vaoO.get(size);
+			VAO a = rt.vaoA.get(size);
+			ModelUploader uploader = rt.modelUploader;
 
 			int start = a.vbo.vb.position();
 			m.calculateBoundsCylinder();
 			try
 			{
-				facePrioritySorter.uploadSortedModel(worldProjection, m, orient, x, y, z, o.vbo.vb, a.vbo.vb);
+				uploader.uploadSortedModel(rt, worldProjection, m, orient, x, y, z, o.vbo.vb, a.vbo.vb, renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH);
 			}
 			catch (Exception ex)
 			{
@@ -1249,9 +1317,11 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			}
 			int end = a.vbo.vb.position();
 
+			o.addRange(ctx.projection, scene, renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH ? renderMode : 0);
+
 			if (end > start)
 			{
-				int offset = scene.getWorldViewId() == -1 ? (SCENE_OFFSET >> 3) : 0;
+				int offset = scene.getWorldViewId() == WorldView.TOPLEVEL ? (SCENE_OFFSET >> 3) : 0;
 				int zx = (gameObject.getX() >> 10) + offset;
 				int zz = (gameObject.getY() >> 10) + offset;
 				Zone zone = ctx.zones[zx][zz];
@@ -1261,8 +1331,11 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		}
 		else
 		{
-			VAO o = vaoO.get(size);
-			clientUploader.uploadTempModel(m, orient, x, y, z, o.vbo.vb);
+			RenderThread rt = rts[0];
+			VAO o = rt.vaoO.get(size);
+			ModelUploader uploader = rt.modelUploader;
+			uploader.uploadTempModel(m, orient, x, y, z, o.vbo.vb);
+			o.addRange(ctx.projection, scene, 0);
 		}
 	}
 
@@ -1362,10 +1435,6 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			lastCanvasWidth = canvasWidth;
 			lastCanvasHeight = canvasHeight;
 
-			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, interfacePbo);
-			glBufferData(GL_PIXEL_UNPACK_BUFFER, canvasWidth * canvasHeight * 4L, GL_STREAM_DRAW);
-			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
 			glBindTexture(GL_TEXTURE_2D, interfaceTexture);
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, canvasWidth, canvasHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, 0);
 			glBindTexture(GL_TEXTURE_2D, 0);
@@ -1377,6 +1446,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		final int height = bufferProvider.getHeight();
 
 		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, interfacePbo);
+		glBufferData(GL_PIXEL_UNPACK_BUFFER, (long) width * height * Integer.BYTES, GL_STREAM_DRAW);
 		ByteBuffer interfaceBuf = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
 		if (interfaceBuf != null)
 		{
@@ -1384,6 +1454,11 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 				.asIntBuffer()
 				.put(pixels, 0, width * height);
 			glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+		}
+		else
+		{
+			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+			return;
 		}
 		glBindTexture(GL_TEXTURE_2D, interfaceTexture);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0);
@@ -1438,8 +1513,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		}
 		catch (RuntimeException ex)
 		{
-			// Notice that for some machines the GPU plugin might crash after long session
-			// Pause all scripts if this happens to avoid getting stuck
+			// Pause scripts if the GPU plugin fails during a long session.
 			Microbot.pauseAllScripts.compareAndSet(false, true);
 			// this is always fatal
 			if (!canvas.isValid())
@@ -1489,18 +1563,20 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			(overlayColor & 0xFF) / 255f,
 			(overlayColor >>> 24) / 255f
 		);
+		glUniform1f(uniUiColorblindIntensity, config.colorBlindIntensity());
+
+		final GraphicsConfiguration graphicsConfiguration = clientUI.getGraphicsConfiguration();
+		final AffineTransform t = graphicsConfiguration.getDefaultTransform();
 
 		if (client.isStretchedEnabled())
 		{
 			Dimension dim = client.getStretchedDimensions();
 			glDpiAwareViewport(0, 0, dim.width, dim.height);
-			glUniform2i(uniTexTargetDimensions, dim.width, dim.height);
+			glUniform2i(uniTexTargetDimensions, getScaledValue(t.getScaleX(), dim.width), getScaledValue(t.getScaleY(), dim.height));
 		}
 		else
 		{
 			glDpiAwareViewport(0, 0, canvasWidth, canvasHeight);
-			final GraphicsConfiguration graphicsConfiguration = clientUI.getGraphicsConfiguration();
-			final AffineTransform t = graphicsConfiguration.getDefaultTransform();
 			glUniform2i(uniTexTargetDimensions, getScaledValue(t.getScaleX(), canvasWidth), getScaledValue(t.getScaleY(), canvasHeight));
 		}
 
@@ -1546,26 +1622,19 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		width = getScaledValue(t.getScaleX(), width);
 		height = getScaledValue(t.getScaleY(), height);
 
-		ByteBuffer buffer = ByteBuffer.allocateDirect(width * height * 4)
-			.order(ByteOrder.nativeOrder());
-
-		glReadBuffer(awtContext.getBufferMode());
-		glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, buffer);
-
 		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
 		int[] pixels = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
 
-		for (int y = 0; y < height; ++y)
-		{
-			for (int x = 0; x < width; ++x)
-			{
-				int r = buffer.get() & 0xff;
-				int g = buffer.get() & 0xff;
-				int b = buffer.get() & 0xff;
-				buffer.get(); // alpha
+		glReadBuffer(awtContext.getBufferMode());
+		glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pixels);
 
-				pixels[(height - y - 1) * width + x] = (r << 16) | (g << 8) | b;
-			}
+		// glReadPixels returns rows bottom-up, flip them to top-down
+		int[] row = new int[width];
+		for (int y0 = 0, y1 = height - 1; y0 < y1; ++y0, --y1)
+		{
+			System.arraycopy(pixels, y0 * width, row, 0, width);
+			System.arraycopy(pixels, y1 * width, pixels, y0 * width, width);
+			System.arraycopy(row, 0, pixels, y1 * width, width);
 		}
 
 		return image;
@@ -1595,13 +1664,12 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void loadScene(WorldView worldView, Scene scene)
 	{
-		if (scene.getWorldViewId() > -1)
+		if (scene.getWorldViewId() != WorldView.TOPLEVEL)
 		{
 			loadSubScene(worldView, scene);
 			return;
 		}
 
-		assert scene.getWorldViewId() == -1;
 		if (nextZones != null)
 		{
 			log.debug("Double zone load!");
@@ -1981,7 +2049,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	public void despawnWorldView(WorldView worldView)
 	{
 		int worldViewId = worldView.getId();
-		if (worldViewId > -1)
+		if (worldViewId != WorldView.TOPLEVEL)
 		{
 			log.debug("WorldView despawn: {}", worldViewId);
 			var sub = subs[worldViewId];
@@ -1998,7 +2066,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void swapScene(Scene scene)
 	{
-		if (scene.getWorldViewId() > -1)
+		if (scene.getWorldViewId() != WorldView.TOPLEVEL)
 		{
 			swapSub(scene);
 			return;
@@ -2127,6 +2195,23 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			}
 
 			log.debug("glGetError:", new Exception(errStr));
+		}
+	}
+
+	@Subscribe
+	private void onCommandExecuted(CommandExecuted event)
+	{
+		if (event.getCommand().equals("gpumem"))
+		{
+			int totalSzKb = 0;
+			for (int i = 0; i < rts.length; ++i)
+			{
+				RenderThread rt = rts[i];
+				int szKb = rt.vaoO.size() + rt.vaoA.size();
+				totalSzKb += szKb;
+				log.info("RenderThread{}: {}kb", i, szKb);
+			}
+			log.info("Total: {}kb", totalSzKb);
 		}
 	}
 }

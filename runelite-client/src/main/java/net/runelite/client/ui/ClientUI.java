@@ -181,8 +181,7 @@ public class ClientUI
 		Provider<ClientThread> clientThreadProvider,
 		EventBus eventBus,
 		@Named("safeMode") boolean safeMode,
-		@Named("runelite.title") String title,
-		@Named("microbot.version") String version
+		@Named("runelite.title") String title
 	)
 	{
 		this.config = config;
@@ -192,7 +191,7 @@ public class ClientUI
 		this.clientThreadProvider = clientThreadProvider;
 		this.eventBus = eventBus;
 		this.safeMode = safeMode;
-		this.title = title + (safeMode ? " (safe mode)" : " V" + version) + " " + proxyMessage;
+		this.title = title + (safeMode ? " (safe mode)" : "");
 
 		normalBoundsTimer = new Timer(250, _ev -> setLastNormalBounds());
 		normalBoundsTimer.setRepeats(false);
@@ -318,7 +317,14 @@ public class ClientUI
 				OSXFullScreenAdapter.install(frame);
 			}
 
-			frame.setTitle(title);
+			final Client apiClient = (Client) this.client;
+			String frameTitle = title;
+			if (apiClient.getLauncherDisplayName() != null && config.usernameInTitle())
+			{
+				frameTitle += " - " + apiClient.getLauncherDisplayName();
+			}
+
+			frame.setTitle(frameTitle);
 			frame.setIconImages(Arrays.asList(ICON_128, ICON_16));
 			frame.setLocationRelativeTo(frame.getOwner());
 			frame.setResizable(true);
@@ -616,7 +622,7 @@ public class ClientUI
 						configManager.setConfiguration(QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", !isEnabled);
 						questHelperNavBtn.setIcon(new ImageIcon(!isEnabled ? questIconOn : questIconOff ));
 						questHelperNavBtn.setToolTipText(!isEnabled ? "Disable 'Semi-Auto' Questing" : "Enable 'Semi-Auto' Questing");
-						if (isEnabled) Rs2Walker.setTarget(null);
+						if (isEnabled) Rs2Walker.clearWalkingRoute("client-ui:quest-helper-toggle-disable");
 					})
 					.build(), false
 			);
@@ -1300,11 +1306,22 @@ public class ClientUI
 
 		if (config.usernameInTitle())
 		{
-			final Player player = ((Client) client).getLocalPlayer();
+			final Client client = (Client) this.client;
+			final Player player = client.getLocalPlayer();
 
-			if (player != null && player.getName() != null)
+			String playerName = null;
+			if (player != null && !Strings.isNullOrEmpty(player.getName()))
 			{
-				frame.setTitle(title + " - " + player.getName());
+				playerName = player.getName();
+			}
+			else if (client.getLauncherDisplayName() != null)
+			{
+				playerName = client.getLauncherDisplayName();
+			}
+
+			if (playerName != null)
+			{
+				frame.setTitle(title + " - " + playerName);
 			}
 		}
 		else

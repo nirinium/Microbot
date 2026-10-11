@@ -58,7 +58,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
-import javax.inject.Provider;
 import javax.inject.Singleton;
 import javax.management.ObjectName;
 import javax.net.ssl.SSLContext;
@@ -77,12 +76,15 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.client.account.SessionManager;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.config.RuneLiteConfig;
 import net.runelite.client.discord.DiscordService;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager;
+import net.runelite.client.plugins.microbot.recovery.RecoveryPrompt;
+import net.runelite.client.plugins.microbot.recovery.StartupRecovery;
 import net.runelite.client.proxy.ProxyChecker;
 import net.runelite.client.proxy.ProxyConfiguration;
 import net.runelite.client.rs.ClientLoader;
@@ -90,9 +92,6 @@ import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.FatalErrorDialog;
 import net.runelite.client.ui.SplashScreen;
 import net.runelite.client.ui.overlay.OverlayManager;
-import net.runelite.client.ui.overlay.WidgetOverlay;
-import net.runelite.client.ui.overlay.tooltip.TooltipOverlay;
-import net.runelite.client.ui.overlay.worldmap.WorldMapOverlay;
 import net.runelite.client.util.OSType;
 import net.runelite.client.util.ReflectUtil;
 import net.runelite.client.util.CrashReportFormatter;
@@ -146,6 +145,8 @@ public class RuneLite
 	public static final File LOGS_DIR = new File(RUNELITE_DIR, "logs");
 	public static final File DEFAULT_SESSION_FILE = new File(RUNELITE_DIR, "session");
 	public static final File NOTIFICATIONS_DIR = new File(RuneLite.RUNELITE_DIR, "notifications");
+	public static final File FONTS_DIR = new File(RuneLite.RUNELITE_DIR, "fonts");
+	public static final Path PLUGIN_DATA = new File(RuneLite.RUNELITE_DIR, "plugin-data").toPath();
 
 	private static final int MAX_OKHTTP_CACHE_SIZE = 20 * 1024 * 1024; // 20mb
 	public static String USER_AGENT = "RuneLite/" + RuneLiteProperties.getVersion();
@@ -179,12 +180,6 @@ public class RuneLite
 
 	@Inject
 	private OverlayManager overlayManager;
-
-	@Inject
-	private Provider<TooltipOverlay> tooltipOverlay;
-
-	@Inject
-	private Provider<WorldMapOverlay> worldMapOverlay;
 
 	@Inject
 	private Gson gson;
@@ -311,10 +306,13 @@ public class RuneLite
 				System.exit(1);
 			}
 
-			ClientUI.proxyMessage = " - Proxy enabled (detected IP " + ip + ")";
+			ClientUI.proxyMessage = "Proxy enabled (IP " + ip + ")";
 		}
 
 
+
+		final boolean safeMode = StartupRecovery.install(RUNELITE_DIR, RuneLiteProperties.getMicrobotVersion(),
+			options.has("safe-mode"), RecoveryPrompt.isEnabled(), new RecoveryPrompt()).isSafeMode();
 
 		SplashScreen.stage(0, "Preparing RuneScape", "");
 
@@ -362,7 +360,7 @@ public class RuneLite
 				clientLoader,
 				runtimeConfigLoader,
 				developerMode,
-				options.has("safe-mode"),
+				safeMode,
 				options.has("disable-telemetry"),
 				options.has("disable-walker-update"),
 				options.valueOf(sessionfile),
@@ -381,6 +379,7 @@ public class RuneLite
 		{
 			startupFailed = true;
 			log.error("Failure during startup", e);
+			StartupRecovery.startupFailed(e);
 			final String crashSummary = CrashReportFormatter.summarize(e);
 			final String crashDetails = CrashReportFormatter.buildReport(e);
 			SwingUtilities.invokeLater(() ->
@@ -485,6 +484,12 @@ public class RuneLite
 		// Load user configuration
 		configManager.load();
 
+		for (String plugin : StartupRecovery.takePendingDisables())
+		{
+			configManager.setConfiguration(RuneLiteConfig.GROUP_NAME, plugin, false);
+			log.info("Startup recovery disabled plugin {}", plugin);
+		}
+
 		// Initialize MicrobotPluginManager after configManager is loaded
 		microbotPluginManager.init();
 
@@ -528,9 +533,7 @@ public class RuneLite
 		eventBus.register(discordService);
 
 		// Add core overlays
-		WidgetOverlay.createOverlays(overlayManager, client).forEach(overlayManager::add);
-		overlayManager.add(worldMapOverlay.get());
-		overlayManager.add(tooltipOverlay.get());
+		overlayManager.init();
 
 		// Start plugins
 		pluginManager.startPlugins();
@@ -607,14 +610,19 @@ public class RuneLite
 			.addInterceptor(chain ->
 			{
 				Request request = chain.request();
-				if (request.header("User-Agent") != null)
+				var ua = request.header("User-Agent");
+				if (ua == null)
 				{
-					return chain.proceed(request);
+					ua = USER_AGENT;
+				}
+				else if (!ua.startsWith("RuneLite"))
+				{
+					ua = USER_AGENT + " " + ua;
 				}
 
 				Request userAgentRequest = request
 					.newBuilder()
-					.header("User-Agent", USER_AGENT)
+					.header("User-Agent", ua)
 					.build();
 				return chain.proceed(userAgentRequest);
 			})

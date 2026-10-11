@@ -9,8 +9,6 @@ import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.shortestpath.Transport;
-import net.runelite.client.plugins.microbot.shortestpath.TransportType;
 import net.runelite.client.plugins.microbot.util.equipment.JewelleryLocationEnum;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
@@ -45,7 +43,7 @@ public class PohTeleports {
      * @return
      */
     public static boolean isInHouse() {
-        return Rs2Player.IsInInstance() && Rs2GameObject.getGameObject(ObjectID.POH_EXIT_PORTAL) != null;
+        return PohPresence.isInHouse();
     }
 
     /**
@@ -123,6 +121,11 @@ public class PohTeleports {
 
         Widget widget = Rs2Widget.findWidget(jewelleryLocationEnum.getDestination().toLowerCase(), Arrays.stream(mainWidget.getStaticChildren()).collect(Collectors.toList()));
 
+        if (widget == null) {
+            Microbot.log(jewelleryLocationEnum.getDestination() + " widget not found in jewellery box");
+            return false;
+        }
+
         boolean isTeleportDisabled = widget.getText().contains("<str>");
 
         if (isTeleportDisabled) {
@@ -145,7 +148,7 @@ public class PohTeleports {
      */
     public static boolean usePortalNexus(NexusPortal nexusPortal) {
         //TODO: Add config here to inform the user if the teleport is a wilderness teleport
-        GameObject portal = Rs2GameObject.getGameObject(NexusPortal.PORTAL_IDS);
+        GameObject portal = findPohObjectAnywhere(NexusPortal.PORTAL_IDS);
         if (getPortalNexusInterface() == null) {
             if (portal != null) {
                 Rs2GameObject.interact(portal, "Teleport Menu");
@@ -204,19 +207,18 @@ public class PohTeleports {
         return true;
     }
 
-    private static List<Integer> FAIRY_RING_IDS = fairyRingIds();
-    private static List<Integer> SPIRIT_TREE_IDS = spiritTreeIds();
+    private static final List<Integer> POH_SPIRIT_RING_IDS = Rs2GameObject.getObjectIdsByName("poh_spirit_ring");
+    private static final Set<Integer> FAIRY_RING_IDS = fairyRingIds();
+    private static final Set<Integer> SPIRIT_TREE_IDS = spiritTreeIds();
 
-    private static List<Integer> fairyRingIds() {
-        List<Integer> ids = new ArrayList<>();
-        ids.addAll(Rs2GameObject.getObjectIdsByName("poh_spirit_ring"));
+    private static Set<Integer> fairyRingIds() {
+        Set<Integer> ids = new LinkedHashSet<>(POH_SPIRIT_RING_IDS);
         ids.addAll(Rs2GameObject.getObjectIdsByName("poh_fairy_ring"));
         return ids;
     }
 
-    private static List<Integer> spiritTreeIds() {
-        List<Integer> ids = new ArrayList<>();
-        ids.addAll(Rs2GameObject.getObjectIdsByName("poh_spirit_ring"));
+    private static Set<Integer> spiritTreeIds() {
+        Set<Integer> ids = new LinkedHashSet<>(POH_SPIRIT_RING_IDS);
         ids.addAll(Rs2GameObject.getObjectIdsByName("poh_spirit_tree"));
         return ids;
     }
@@ -230,10 +232,43 @@ public class PohTeleports {
     }
 
     public static boolean isFairyRing(TileObject tileObject) {
-        return FAIRY_RING_IDS.stream().anyMatch(id -> id == tileObject.getId());
+        return FAIRY_RING_IDS.contains(tileObject.getId());
     }
 
     public static boolean isSpiritTree(TileObject tileObject) {
-        return SPIRIT_TREE_IDS.stream().anyMatch(id -> id == tileObject.getId());
+        return SPIRIT_TREE_IDS.contains(tileObject.getId());
+    }
+
+    /**
+     * Scans the entire loaded scene for any GameObject matching the given ids, bypassing the
+     * {@link Rs2Player#getWorldLocation()} anchor that breaks every Rs2GameObject search when
+     * the player is in a POH instance.
+     *
+     * <p>Inside a POH, {@code Rs2Player.getWorldLocation()} returns the overworld-template tile
+     * (e.g. (1877, 7052, 1)), which isn't present in the actual loaded scene grid, so any
+     * search routed through that anchor converts to a null LocalPoint and returns nothing
+     * even when the object is plainly visible. This helper walks the raw
+     * {@code Scene.getTiles()[][][]} structure directly on the client thread, which is always
+     * valid regardless of instance.</p>
+     */
+    private static GameObject findPohObjectAnywhere(Integer[] ids) {
+        java.util.Set<Integer> idSet = java.util.Arrays.stream(ids).collect(java.util.stream.Collectors.toSet());
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            net.runelite.api.Client client = Microbot.getClient();
+            if (client == null) return null;
+            net.runelite.api.Scene scene = client.getTopLevelWorldView().getScene();
+            net.runelite.api.Tile[][][] tiles = scene.getTiles();
+            for (net.runelite.api.Tile[][] plane : tiles) {
+                for (net.runelite.api.Tile[] row : plane) {
+                    for (net.runelite.api.Tile tile : row) {
+                        if (tile == null) continue;
+                        for (GameObject go : tile.getGameObjects()) {
+                            if (go != null && idSet.contains(go.getId())) return go;
+                        }
+                    }
+                }
+            }
+            return null;
+        }).orElse(null);
     }
 }

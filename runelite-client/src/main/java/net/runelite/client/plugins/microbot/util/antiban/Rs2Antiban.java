@@ -287,9 +287,6 @@ public class Rs2Antiban {
     }
 
     private static void performActionCooldown() {
-        if (Rs2AntibanSettings.universalAntiban)
-			Microbot.pauseAllScripts.compareAndSet(false, true);
-
         if (Rs2AntibanSettings.nonLinearIntervals)
             playStyle.evolvePlayStyle();
 
@@ -297,6 +294,12 @@ public class Rs2Antiban {
             TIMEOUT = playStyle.getRandomTickInterval();
         else
             TIMEOUT = playStyle.getPrimaryTickInterval();
+
+        // The pause (universal antiban only) and the always-set active flag both happen only after
+        // TIMEOUT is computed: if computing the interval ever throws, scripts must not be left
+        // paused with no countdown to clear them.
+        if (Rs2AntibanSettings.universalAntiban)
+			Microbot.pauseAllScripts.compareAndSet(false, true);
 
         Rs2AntibanSettings.actionCooldownActive = true;
 
@@ -346,7 +349,7 @@ public class Rs2Antiban {
             logDebug("MICRO BREAKS ARE DISABLED, cannot take micro break");
             return false;
         }
-        if (Math.random() < Rs2AntibanSettings.microBreakChance) {
+        if (Rs2Random.diceFractional(Rs2AntibanSettings.microBreakChance)) {
             Rs2AntibanSettings.microBreakActive = true;
             logDebug("Micro break triggered by antiban system");
             if (Rs2AntibanSettings.moveMouseOffScreen)
@@ -448,6 +451,7 @@ public class Rs2Antiban {
      */
 
     public static void renderAntibanOverlayComponents(PanelComponent panelComponent) {
+        if (playStyle == null) return;
         final ProgressBarComponent progressBarComponent = new ProgressBarComponent();
         progressBarComponent.setBackgroundColor(Color.DARK_GRAY);
         progressBarComponent.setForegroundColor(ColorUtil.fromHex("#cc8400"));

@@ -147,13 +147,25 @@ public class PohPanel extends PluginPanel {
         }
         detectButton.setEnabled(false);
         detectButton.setText("Detecting...");
-        checkboxPanel.detectPohFacilities();
-        portalPanel.setAll(PohPortal.findPortalsInPoh());
-        nexusPanel.setAll(NexusPortal.getAvailableTeleports());
-        jewelleryBoxPanel.detectJewelleryBox();
-        tilePanel.detectTile();
-        detectButton.setEnabled(true);
-        detectButton.setText("Detect available POH teleports");
+        try {
+            detectSection("house features", () -> checkboxPanel.detectPohFacilities());
+            detectSection("portals", () -> portalPanel.setAll(PohPortal.findPortalsInPoh()));
+            detectSection("Nexus", () -> nexusPanel.setAll(NexusPortal.getAvailableTeleports()));
+            detectSection("jewellery box", () -> jewelleryBoxPanel.detectJewelleryBox());
+            detectSection("exit portal", () -> tilePanel.detectTile());
+        } finally {
+            detectButton.setEnabled(true);
+            detectButton.setText("Detect available POH teleports");
+        }
+    }
+
+    private static void detectSection(String name, Runnable detection) {
+        try {
+            detection.run();
+        } catch (RuntimeException ex) {
+            Microbot.log("POH detection failed for " + name + ": " + ex.getClass().getSimpleName());
+            Microbot.logStackTrace("POH detection: " + name, ex);
+        }
     }
 
     /**
@@ -165,6 +177,17 @@ public class PohPanel extends PluginPanel {
      *         and the value is a set of `Transport` instances representing the available
      *         methods of transportation to the inside of PoH.
      */
+    /**
+     * The user-configured POH exit-portal tile. All POH transports registered by this panel
+     * (Portal Nexus, Jewellery Box, Fairy Ring, Spirit Tree, etc.) use this tile as their
+     * transport origin, so callers that need to start a pathfinder search from inside a POH
+     * must remap their current location to this tile.
+     */
+    public static WorldPoint getExitPortalTile() {
+        if (instance == null || instance.tilePanel == null) return null;
+        return instance.tilePanel.getTile();
+    }
+
     public static Map<WorldPoint, Set<Transport>> getTransportsToPoh() {
         HouseLocation location = HouseLocation.getHouseLocation();
         Map<WorldPoint, Set<Transport>> transportMap = new HashMap<>();
@@ -193,6 +216,11 @@ public class PohPanel extends PluginPanel {
      * @return allTransports map with all cached PoH transports added in
      */
     public static Map<WorldPoint, Set<Transport>> getAvailableTransports(Map<WorldPoint, Set<Transport>> allTransports) {
+        return getAvailableTransports(allTransports, true);
+    }
+
+    public static Map<WorldPoint, Set<Transport>> getAvailableTransports(
+            Map<WorldPoint, Set<Transport>> allTransports, boolean usePortalNexus) {
         if (instance == null) return allTransports;
         Set<PohTeleport> pohTeleports = new HashSet<>();
         Map<WorldPoint, Set<Transport>> pohTransports = new HashMap<>();
@@ -204,7 +232,9 @@ public class PohPanel extends PluginPanel {
 
         pohTeleports.addAll(instance.checkboxPanel.getTeleports());
         pohTeleports.addAll(instance.portalPanel.getTeleports());
-        pohTeleports.addAll(instance.nexusPanel.getTeleports());
+        if (usePortalNexus) {
+            pohTeleports.addAll(instance.nexusPanel.getTeleports());
+        }
         pohTeleports.addAll(instance.jewelleryBoxPanel.getTeleports());
 
         if (instance.checkboxPanel.fairyRingCb.isSelected()) {

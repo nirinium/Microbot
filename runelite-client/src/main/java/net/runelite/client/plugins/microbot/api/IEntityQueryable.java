@@ -16,6 +16,8 @@ public interface IEntityQueryable<Q extends IEntityQueryable<Q, E>, E extends IE
 
     Q withName(String name);
 
+    Q withNameContains(String substring);
+
     Q withNames(String... names);
 
     Q withId(int id);
@@ -34,6 +36,8 @@ public interface IEntityQueryable<Q extends IEntityQueryable<Q, E>, E extends IE
     E nearest(WorldPoint anchor, int maxDistance);
 
     List<E> toList();
+
+    int count();
 
     E firstOnClientThread();
 

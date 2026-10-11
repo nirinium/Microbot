@@ -5,7 +5,6 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.shortestpath.ShortestPathPlugin;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import org.slf4j.event.Level;
 
@@ -26,7 +25,6 @@ import java.util.stream.Collectors;
 public class Rs2NpcManager {
     private static final Set<Integer> blacklistXpMultiplier = Set.of(8026, 8058, 8059, 8060, 8061, 7850, 7852, 7853, 7884, 7885, 7849, 7851, 7854, 7855, 7882, 7883, 7886, 7887, 7888, 7889, 494, 6640, 6656, 2042, 2043, 2044);
     public static Map<Integer, String> attackStyleMap;
-    public static Map<Integer, String> attackAnimationMap;
     private static Map<Integer, Rs2NpcStats> statsMap;
 
     // NEW: A map keyed by NPC name, with a list of location objects
@@ -40,15 +38,10 @@ public class Rs2NpcManager {
         if (statsMap != null) {
             return;
         }
-        Type statsTypeToken = new TypeToken<Map<Integer, Rs2NpcStats>>() {}.getType();
-
         statsMap = loadNpcStatsFromJsonFile("/npc/monsters_complete.json");
 
         Type attackStyleTypeToken = new TypeToken<Map<Integer, String>>() {}.getType();
         attackStyleMap = loadJsonFile("/npc/npcs_attack_style.json", attackStyleTypeToken);
-
-        Type attackAnimationTypeToken = new TypeToken<Map<Integer, String>>() {}.getType();
-        attackAnimationMap = loadJsonFile("/npc/npcs_attack_animation.json", attackAnimationTypeToken);
 
         loadNpcLocationsByName();
     }
@@ -216,7 +209,7 @@ public class Rs2NpcManager {
      */
     public static int getAttackSpeed(int npcId) {
         Rs2NpcStats s = statsMap.get(npcId);
-        Microbot.log(s.toString());
+        if (s == null) return -1;
         return s.getAttackSpeed() != -1 ? s.getAttackSpeed() : -1;
     }
 
@@ -291,8 +284,6 @@ public class Rs2NpcManager {
      * @param avoidWilderness Whether to avoid locations in the Wilderness.
      */
     public static MonsterLocation getClosestLocation(String npcName, int minClustering, boolean avoidWilderness) {
-        boolean originalUseBankItems = ShortestPathPlugin.getPathfinderConfig().isUseBankItems();
-        ShortestPathPlugin.getPathfinderConfig().setUseBankItems(true);
         Microbot.log(Level.INFO,"Finding closest location for: " + npcName);
 
         List<MonsterLocation> allLocations = getNpcLocations(npcName);
@@ -315,9 +306,11 @@ public class Rs2NpcManager {
             return null;
         }
 
-        List<WorldPoint> centers = validLocations.stream()
+        List<MonsterLocation> centeredLocations = validLocations.stream()
+                .filter(location -> location.getBestClusterCenter() != null)
+                .collect(Collectors.toList());
+        List<WorldPoint> centers = centeredLocations.stream()
                 .map(MonsterLocation::getBestClusterCenter)
-                .filter(Objects::nonNull)
                 .collect(Collectors.toList());
         if (centers.isEmpty()) {
             Microbot.log(Level.INFO,"Could not compute any centers for " + npcName);
@@ -326,14 +319,17 @@ public class Rs2NpcManager {
 
         // 6) Find nearest and return
         int idx = Rs2Walker.findNearestAccessibleTarget(centers, true);
-        MonsterLocation closest = validLocations.get(idx);
+        if (idx < 0 || idx >= centeredLocations.size()) {
+            Microbot.log(Level.INFO,"No accessible location found for " + npcName);
+            return null;
+        }
+        MonsterLocation closest = centeredLocations.get(idx);
         if (closest.getCoords().isEmpty()) {
             Microbot.log(Level.INFO,"Closest location had no coords for " + npcName);
             return null;
         }
 
         Microbot.log(Level.INFO,"Closest location for " + npcName + ": " + closest.getLocationName());
-        ShortestPathPlugin.getPathfinderConfig().setUseBankItems(originalUseBankItems);
         return closest;
     }
 

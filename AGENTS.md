@@ -1,44 +1,44 @@
-# Microbot Project Notes (for Codex)
+# Microbot
 
-## Microbot at a Glance
-Microbot is a RuneLite-based Old School RuneScape client fork with an always-on hidden plugin that hosts automation scripts. It packages a shaded client for end users and keeps developer ergonomics via Queryable caches and script helpers under `microbot/util`. The build mirrors upstream RuneLite as a composite Gradle setup.
+RuneLite fork with a hidden always-on plugin hosting automation scripts. Composite Gradle build, Java 11 target (JDK 17+ to develop).
 
-## Tech Stack
-- Java target 11 (develop/run with JDK 17+), Gradle wrapper, composite builds (`cache`, `runelite-api`, `runelite-client`, `runelite-gradle-plugin`, `runelite-jshell`).
-- RuneLite client + plugin APIs, LWJGL, Guice, Lombok, OkHttp, Gson, Logback/SLF4J.
-- CI helper `ci/build.sh` bootstraps `glslang` then runs `./gradlew :buildAll`.
+## Build / validate
+- Compile: `./gradlew :client:compileJava`
+- Full: `./gradlew buildAll`
+- Shaded jar: `./gradlew :client:assemble`
+- Tests (opt-in): `:client:runUnitTests`, `:client:runTests`, `:client:runIntegrationTest` (needs running game)
 
-## Repo Map
-- `runelite-client/` – Main client (`:client`) containing the Microbot plugin and shaded jar assembly.
-- `runelite-api/` – RuneLite API included build consumed by the client.
-- `runelite-gradle-plugin/` – Gradle plugins for assemble/index/jarsign tasks.
-- `runelite-jshell/` – JShell support artifacts.
-- `cache/` – Cache tools/build used by RuneLite.
-- `docs/` – User/dev docs and static site assets.
-- `config/` – Shared Checkstyle configuration.
-- `ci/` – CI build helper script.
+## Non-negotiable rules
+- Never instantiate caches/queryables directly — use `Microbot.getRs2XxxCache().query()` / `.getStream()`. See `runelite-client/src/main/java/net/runelite/client/plugins/microbot/api/QUERYABLE_API.md`.
+- Never block/sleep on the client thread.
+- Never use static sleeps to wait for game state — use `sleepUntil(condition, timeoutMs)`.
+- Keep `MicrobotPlugin` hidden/always-on; don't break its config panel wiring.
+- Respect existing Checkstyle/Lombok patterns; don't weaken security (telemetry tokens, HTTP clients).
+- Minimal logging; no PII or session identifiers.
 
-## How to Validate Changes
-- Fast sanity: `./gradlew :client:compileJava`
-- Full build (all included builds): `./gradlew buildAll`
-- Assemble shaded client: `./gradlew :client:assemble` (creates `runelite-client/build/libs/*-shaded.jar` and `microbot-<version>.jar`)
-- Tests are disabled by default via Gradle config; enable/selectively run if you add tests (`./gradlew :client:runTests` or `runDebugTests`).
+## Review priority
+- **P0:** client crashes, client-thread blocking, login/world-hop breakage, cache invariant corruption, credential/token exposure.
+- **P1:** script loop timing, overlay correctness, plugin discovery/config, shaded-jar packaging, build reproducibility.
 
-## Non-Negotiable Rules
-- Never instantiate caches or queryables directly; always use `Microbot.getRs2XxxCache().query()` or `.getStream()` (see `runelite-client/src/main/java/net/runelite/client/plugins/microbot/api/QUERYABLE_API.md`).
-- Do not block or sleep on the RuneLite client thread; long work belongs on script/executor threads.
-- Keep logging minimal; avoid PII/session identifiers and respect existing log levels/patterns.
-- Preserve the hidden/always-on nature of `MicrobotPlugin` and its config panel wiring.
-- Follow Checkstyle/Lombok patterns already in the codebase; do not downgrade security (e.g., telemetry token handling, HTTP clients) without discussion.
+## Runtime tooling
+- `./microbot-cli` (JSON output) — see `docs/MICROBOT_CLI.md`, HTTP API `docs/AGENT_SERVER.md`, full tool list `docs/AGENT_SCRIPT_TOOLS.md`.
+- Agent Server plugin runs on port 8081 by default.
+- Offline client-thread lookup: `./microbot-cli ct <method>`.
+- Test mode: `-Dmicrobot.test.mode=true -Dmicrobot.test.script=<PluginName>` → results in `~/.runelite/test-results/`. Protocol: `docs/AGENTIC_TESTING_LOOP.md`.
 
-## Review Guidelines
-- P0: Anything that can crash the client, block the client thread, break world hopping/login, corrupt cache/queryable invariants, or expose credentials/telemetry tokens.
-- P1: Regressions to script loop timing, overlay correctness, plugin discovery/config panels, packaging (shaded jar/version props), or build reproducibility.
-- Check threading (client vs script), cache access patterns, Gradle task wiring, and error handling around network calls.
+## In-game settings
+Use the settings search bar — tab indices shift on updates. Verify changes via `./microbot-cli varbit <id>`.
 
-## When Unsure
-- Start with `docs/ARCHITECTURE.md` and `docs/decisions/` for background.
-- API and script usage: `runelite-client/src/main/java/net/runelite/client/plugins/microbot/api/README.md` and `QUERYABLE_API.md`.
-- Development/setup: `docs/development.md`; installation: `docs/installation.md`.
-- Still unclear? Ask in Discord (link in `README.md`) or leave TODO with assumption noted.
+## Before touching `microbot/util/`
+Read `docs/entity-guides/README.md`. Add a gotcha there when you fix an entity-assumption bug.
 
+## Docs maintenance
+- Keep root `README.md`, `docs/README.md`, and `docs/INDEX.md` short routing pages.
+- Put volatile command details, API examples, endpoint lists, generated inventories, and screenshots in the narrowest owning doc.
+- Prefer links to owner docs over copying the same guidance into multiple high-level files.
+
+## Deeper guides
+- Script authoring & threading: `runelite-client/.../microbot/AGENTS.md`
+- State machines (use for 3+ phase scripts): `.../microbot/statemachine/AGENTS.md`
+- Architecture: `docs/ARCHITECTURE.md`, `docs/decisions/`
+- Setup: `docs/development.md`, `docs/installation.md`

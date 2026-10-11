@@ -38,6 +38,8 @@ fun loadRootProperty(name: String): String? {
 
 val microbotVersionProvider = providers.gradleProperty("microbot.version")
     .orElse(loadRootProperty("microbot.version") ?: "0.0.0")
+val injectedClientVersionProvider = providers.gradleProperty("runelite.injected-client.version")
+    .orElse(loadRootProperty("runelite.injected-client.version") ?: project.version.toString())
 
 plugins {
     java
@@ -52,6 +54,66 @@ plugins {
 
 }
 
+sourceSets.named("main") {
+    java.srcDir("src/upstreamPlanner/src/main/java")
+}
+
+// The pinned upstream core loads the same reviewed collision archive from its original root path.
+// Keep one source artifact and copy it into both runtime resource namespaces during assembly.
+tasks.named<ProcessResources>("processResources") {
+    from("src/main/resources/net/runelite/client/plugins/microbot/shortestpath/collision-map.zip") {
+        into("")
+    }
+}
+
+tasks.withType<Checkstyle>().configureEach {
+    exclude("shortestpath/**")
+}
+
+tasks.withType<Pmd>().configureEach {
+    exclude("shortestpath/**")
+}
+
+// Module-system flags required to extend com.apple.eawt.FullScreenAdapter on macOS
+// (OSXFullScreenAdapter). Without these, the JVM throws IllegalAccessError at class load.
+val macEawtJvmArgs = listOf(
+    "--add-opens=java.desktop/com.apple.eawt=ALL-UNNAMED",
+    "--add-opens=java.desktop/com.apple.eawt.event=ALL-UNNAMED",
+    "--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED",
+    "--add-exports=java.desktop/com.apple.eawt.event=ALL-UNNAMED"
+)
+
+tasks.register<JavaExec>("run") {
+    group = "application"
+    description = "Run RuneLite client"
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("net.runelite.client.RuneLite")
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-ea"
+    )
+    jvmArgs(macEawtJvmArgs)
+}
+
+tasks.register<JavaExec>("seedMenuActionInfo") {
+    group = "verification"
+    description = "Generate src/main/resources/.../menu-action-info.properties from the injected-client jar. Re-run when the injected-client dependency bumps."
+
+    dependsOn(":client:compileJava")
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("net.runelite.client.plugins.microbot.util.reflection.MenuActionResourceSeeder")
+
+    val outputFile = file("src/main/resources/net/runelite/client/plugins/microbot/util/reflection/menu-action-info.properties")
+    args(outputFile.absolutePath)
+
+    doFirst {
+        outputFile.parentFile.mkdirs()
+    }
+}
+
 tasks.register<JavaExec>("runDebug") {
     group = "application"
     description = "Run RuneLite client with JDWP debug"
@@ -62,9 +124,29 @@ tasks.register<JavaExec>("runDebug") {
     // same JVM args you need normally
     jvmArgs(
         "-Dfile.encoding=UTF-8",
+        "-ea",
         // JDWP agent for debugger
         "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
     )
+    jvmArgs(macEawtJvmArgs)
+}
+
+tasks.register<JavaExec>("runTest") {
+    group = "verification"
+    description = "Run client in test mode — auto-login, enable target plugin, write results, exit"
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("net.runelite.client.RuneLite")
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-ea"
+    )
+    jvmArgs(macEawtJvmArgs)
+
+    System.getProperties()
+        .filter { it.key.toString().startsWith("microbot.test.") }
+        .forEach { (k, v) -> jvmArgs("-D$k=$v") }
 }
 
 tasks.register<Test>("runDebugTests") {
@@ -108,6 +190,200 @@ tasks.register<Test>("runTests") {
     }
 }
 
+tasks.register<JavaExec>("exportLocalPlannerComparison") {
+    group = "verification"
+    description = "Export deterministic local planner results for the opt-in upstream comparison harness"
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("net.runelite.client.plugins.microbot.util.walker.LocalPlannerComparisonMain")
+
+    val corpus = providers.gradleProperty("plannerCorpus")
+    val output = providers.gradleProperty("plannerOutput")
+    doFirst {
+        require(corpus.isPresent && output.isPresent) {
+            "exportLocalPlannerComparison requires -PplannerCorpus=<path> and -PplannerOutput=<path>"
+        }
+        args(rootProject.file(corpus.get()).absolutePath, rootProject.file(output.get()).absolutePath)
+        systemProperty("microbot.planner.revision",
+            providers.gradleProperty("plannerRevision").getOrElse("unknown"))
+    }
+
+    outputs.upToDateWhen { false }
+}
+
+tasks.register<JavaExec>("exportEmbeddedUpstreamPlannerComparison") {
+    group = "verification"
+    description = "Export results from the production-packaged pinned upstream planner adapter"
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("net.runelite.client.plugins.microbot.util.walker.LocalPlannerComparisonMain")
+
+    val corpus = providers.gradleProperty("plannerCorpus")
+    val output = providers.gradleProperty("plannerOutput")
+    doFirst {
+        require(corpus.isPresent && output.isPresent) {
+            "exportEmbeddedUpstreamPlannerComparison requires -PplannerCorpus=<path> and -PplannerOutput=<path>"
+        }
+        args(rootProject.file(corpus.get()).absolutePath, rootProject.file(output.get()).absolutePath)
+        systemProperty("microbot.planner.revision",
+            providers.gradleProperty("plannerRevision").getOrElse("unknown"))
+        systemProperty("microbot.planner.embedded-upstream", "true")
+    }
+
+    outputs.upToDateWhen { false }
+}
+
+tasks.register<Test>("runUnitTests") {
+    group = "verification"
+    description = "Run unit tests only (no client, no login) — safe for CI"
+
+    // ClientThreadGuardrailTest scans compiled .class files under runelite-{api,client}/build,
+    // so make sure the main sources are compiled before the test JVM forks.
+    dependsOn(":client:compileJava")
+
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-Duser.timezone=Europe/Brussels",
+        "-ea"
+    )
+
+    // Forward the baseline-regenerate flags to the test JVM so contributors can run
+    // `./gradlew :client:runUnitTests -Dmicrobot.guardrail.regenerate-baseline=true` ad-hoc.
+    System.getProperty("microbot.guardrail.regenerate-baseline")?.let {
+        systemProperty("microbot.guardrail.regenerate-baseline", it)
+    }
+    System.getProperty("microbot.queryable-guardrail.regenerate-baseline")?.let {
+        systemProperty("microbot.queryable-guardrail.regenerate-baseline", it)
+    }
+
+    exclude("**/Rs2ActorModelIntegrationTest.class")
+    exclude("**/Rs2WalkerIntegrationTest.class")
+    exclude("**/Rs2ReflectionGroundItemActionsIntegrationTest.class")
+    exclude("**/threadsafety/ClientThreadScannerTest.class")
+    exclude("**/ScreenshotHandlerTest.class")
+
+    useJUnit()
+
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+tasks.register<Test>("regenerateClientThreadGuardrailBaseline") {
+    group = "verification"
+    description = "Regenerate src/test/resources/threadsafety/client-thread-guardrail-baseline.txt from current sources"
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-Duser.timezone=Europe/Brussels",
+        "-Dmicrobot.guardrail.regenerate-baseline=true"
+    )
+
+    include("**/threadsafety/ClientThreadGuardrailTest.class")
+
+    useJUnit()
+    outputs.upToDateWhen { false }
+
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+tasks.register<Test>("regenerateQueryableTerminalBaseline") {
+    group = "verification"
+    description = "Regenerate src/test/resources/threadsafety/queryable-terminal-guardrail-baseline.txt from current sources"
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-Duser.timezone=Europe/Brussels",
+        "-Dmicrobot.queryable-guardrail.regenerate-baseline=true"
+    )
+
+    include("**/threadsafety/QueryableTerminalGuardrailTest.class")
+
+    useJUnit()
+    outputs.upToDateWhen { false }
+
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+tasks.register<Test>("runClientThreadScanner") {
+    group = "verification"
+    description = "Manually scan compiled bytecode for client-thread markers and emit docs/client-thread-manifest.md"
+    enabled = true
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-Duser.timezone=Europe/Brussels",
+        "-Dmicrobot.scanner.enabled=true"
+    )
+
+    include("**/threadsafety/ClientThreadScannerTest.class")
+
+    useJUnit()
+    outputs.upToDateWhen { false }
+
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+tasks.register<Test>("runIntegrationTest") {
+    group = "verification"
+    description = "Run Rs2ActorModel integration test with live client"
+    enabled = true
+
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+
+    jvmArgs(
+        "-Dfile.encoding=UTF-8",
+        "-Duser.timezone=Europe/Brussels",
+        "-ea"
+    )
+
+    include("**/Rs2ActorModelIntegrationTest.class")
+    include("**/Rs2WalkerIntegrationTest.class")
+
+    useJUnit()
+
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
 lombok.version = libs.versions.lombok.get()
 
 java {
@@ -117,7 +393,7 @@ java {
 dependencies {
     api("net.runelite:runelite-api:${project.version}")
     implementation(project(":jshell"))
-    runtimeOnly("net.runelite:injected-client:${project.version}")
+    runtimeOnly("net.runelite:injected-client:${injectedClientVersionProvider.get()}")
 
     api(libs.rl.http.api)
     api(libs.rl.discord)
@@ -181,6 +457,11 @@ val shadowJar = tasks.register<Jar>("shadowJar") {
     dependsOn(configurations.runtimeClasspath)
     manifest {
         attributes["Main-Class"] = "net.runelite.client.RuneLite"
+        // Allows OSXFullScreenAdapter (which extends com.apple.eawt.FullScreenAdapter)
+        // to load when launched via `java -jar`. JVM still requires --add-opens to
+        // actually subclass the sealed class; manifest covers reflection access.
+        attributes["Add-Opens"] = "java.desktop/com.apple.eawt java.desktop/com.apple.eawt.event"
+        attributes["Add-Exports"] = "java.desktop/com.apple.eawt java.desktop/com.apple.eawt.event"
     }
 
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
@@ -226,7 +507,7 @@ publishing {
 val assemble = tasks.withType<net.runelite.gradle.assemble.AssembleTask> {
     scriptDirectory = file("src/main/scripts")
     outputDirectory = sourceSets.main.map { File(it.output.resourcesDir, "runelite") }
-    componentsFile = file("../runelite-api/src/main/interfaces/interfaces.toml")
+    longSupport = true
 }
 
 tasks.withType<net.runelite.gradle.index.IndexTask> {
@@ -251,10 +532,14 @@ tasks.processResources {
 
     val microbotVersion = microbotVersionProvider.get()
     val microbotCommit = providers.gradleProperty("microbot.commit.sha").getOrElse(commit.toString().trim())
+    val microbotBuildChannel = providers.gradleProperty("microbot.build.channel").getOrElse("")
+    val microbotBuildRepository = providers.gradleProperty("microbot.build.repository").getOrElse("")
 
     // Ensure task reruns when injected values change
     inputs.property("microbotVersion", microbotVersion)
     inputs.property("microbotCommit", microbotCommit)
+    inputs.property("microbotBuildChannel", microbotBuildChannel)
+    inputs.property("microbotBuildRepository", microbotBuildRepository)
 
     filesMatching("net/runelite/client/runelite.properties") {
         filter { it.replace("\${project.version}", project.version.toString()) }
@@ -262,6 +547,8 @@ tasks.processResources {
         filter { it.replace("\${git.dirty}", dirty.toString().isNotBlank().toString()) }
         filter { it.replace("\${microbot.version}", microbotVersion) }
         filter { it.replace("\${microbot.commit.sha}", microbotCommit) }
+        filter { it.replace("\${microbot.build.channel}", microbotBuildChannel) }
+        filter { it.replace("\${microbot.build.repository}", microbotBuildRepository) }
     }
 }
 
@@ -302,7 +589,9 @@ tasks.checkstyleMain {
 }
 
 tasks.withType<Test> {
-    enabled = false
+    if (name != "runIntegrationTest" && name != "runTests" && name != "runDebugTests" && name != "runUnitTests" && name != "runClientThreadScanner" && name != "regenerateClientThreadGuardrailBaseline" && name != "regenerateQueryableTerminalBaseline") {
+        enabled = false
+    }
     systemProperty("glslang.path", providers.gradleProperty("glslangPath").getOrElse(""))
 }
 

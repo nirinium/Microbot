@@ -51,9 +51,6 @@ public class BlockingEventManager
         // single-threaded executor for running event.execute()
         this.blockingExecutor = Executors.newSingleThreadExecutor(threadFactory);
 
-        // scheduler for periodic validate() calls
-        startLoop();
-
         // pre-register core events
         blockingEvents.add(new WelcomeScreenEvent());
         blockingEvents.add(new DisableLevelUpInterfaceEvent());
@@ -63,8 +60,16 @@ public class BlockingEventManager
         blockingEvents.add(new PluginPauseEvent());
 		blockingEvents.add(new EnjoyRSChatboxEvent());
 		blockingEvents.add(new DisableWorldSwitcherConfirmationEvent());
+		blockingEvents.add(new HideRoofsEvent());
 
         sortBlockingEvents();
+    }
+
+    public synchronized void start() {
+        if (loopFuture != null && !loopFuture.isCancelled() && !loopFuture.isDone()) {
+            return;
+        }
+        startLoop();
     }
 
     public void shutdown() {
@@ -175,7 +180,8 @@ public class BlockingEventManager
 
         if (!isRunning.compareAndSet(false, true))
         {
-            // if somebody else started in the meantime, we consider it “busy”
+            // Another thread started processing; re-queue so the event is not lost
+            eventQueue.offer(event);
             return true;
         }
 

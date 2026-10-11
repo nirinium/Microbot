@@ -26,9 +26,9 @@ package net.runelite.client.plugins.microbot.ui;
 
 import lombok.Getter;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.microbot.AlwaysOnPlugins;
 import net.runelite.client.plugins.config.SearchablePlugin;
 import net.runelite.client.ui.ColorScheme;
-import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.SwingUtil;
 import org.jetbrains.annotations.NotNull;
@@ -47,6 +47,7 @@ class MicrobotPluginListItem extends JPanel implements SearchablePlugin
 {
 	private static final ImageIcon ON_STAR;
 	private static final ImageIcon OFF_STAR;
+	private static final int MIN_ITEM_HEIGHT = 20;
 
 	private final MicrobotPluginListPanel pluginListPanel;
 
@@ -91,9 +92,10 @@ class MicrobotPluginListItem extends JPanel implements SearchablePlugin
 		}
 
 		setLayout(new BorderLayout(3, 0));
-		setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH, 20));
 
 		JLabel nameLabel = createNameLabel(pluginConfig);
+		int itemHeight = Math.max(MIN_ITEM_HEIGHT, nameLabel.getPreferredSize().height);
+		setPreferredSize(new Dimension(MicrobotPluginListPanel.LIST_ITEM_WIDTH, itemHeight));
 
 		pinButton = new JToggleButton(OFF_STAR);
 		pinButton.setSelectedIcon(ON_STAR);
@@ -163,9 +165,10 @@ class MicrobotPluginListItem extends JPanel implements SearchablePlugin
 				}
 			});
 
-			if (pluginDescriptor.alwaysOn()) {
+			if (AlwaysOnPlugins.isLocked(pluginDescriptor)) {
 				onOffToggle.setEnabled(false);
 				onOffToggle.setSelected(true);
+				onOffToggle.setToolTipText(AlwaysOnPlugins.TOOLTIP);
 				pluginListPanel.startPlugin(pluginConfig.getPlugin());
 			}
 			if (pluginDescriptor.disableOnStartUp()) {
@@ -186,17 +189,25 @@ class MicrobotPluginListItem extends JPanel implements SearchablePlugin
 
 	@NotNull
 	private static JLabel createNameLabel(MicrobotPluginConfigurationDescriptor pluginConfig) {
-		JLabel nameLabel = new JLabel(pluginConfig.getName());
 		int buttons = 21 /*pin*/ + 25 /*config, if present*/ + 34 /*toggle approx*/ + 12 /*margins*/;
-		int textWidth = PluginPanel.PANEL_WIDTH - buttons;
-		nameLabel.setText("<html><div style='width:" + textWidth + "px'>" + pluginConfig.getName() + "</div></html>");
+		int textWidth = MicrobotPluginListPanel.LIST_ITEM_WIDTH - buttons;
+		JLabel nameLabel = new JLabel("<html><div style='width:" + textWidth + "px'>" + htmlBody(pluginConfig.getName()) + "</div></html>");
 		nameLabel.setForeground(Color.WHITE);
+		nameLabel.setHorizontalAlignment(JLabel.LEFT);
+		nameLabel.setVerticalAlignment(JLabel.CENTER);
 
 		if (!pluginConfig.getDescription().isEmpty())
 		{
-			nameLabel.setToolTipText("<html>" + pluginConfig.getName() + ":<br>" + pluginConfig.getDescription() + "</html>");
+			nameLabel.setToolTipText("<html>" + htmlBody(pluginConfig.getName()) + ":<br>" + htmlBody(pluginConfig.getDescription()) + "</html>");
 		}
 		return nameLabel;
+	}
+
+	private static String htmlBody(String html)
+	{
+		return html
+			.replaceFirst("(?i)^\\s*<html>", "")
+			.replaceFirst("(?i)</html>\\s*$", "");
 	}
 
 	@Override

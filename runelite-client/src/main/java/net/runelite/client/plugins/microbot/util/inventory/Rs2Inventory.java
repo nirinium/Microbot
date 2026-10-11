@@ -38,6 +38,7 @@ import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static net.runelite.client.plugins.microbot.Microbot.log;
@@ -50,7 +51,7 @@ public class Rs2Inventory {
     private static final int CAPACITY = COLUMNS * ROWS;
     private static final String[] EMPTY_ARRAY = new String[0];
 
-    private static List<Rs2ItemModel> inventoryItems = Collections.emptyList();
+    private static volatile List<Rs2ItemModel> inventoryItems = Collections.emptyList();
 
     public static ItemContainer inventory() {
         return Microbot.getClient().getItemContainer(InventoryID.INV);
@@ -74,6 +75,21 @@ public class Rs2Inventory {
     }
 
     public static Stream<Rs2ItemModel> items() {
+        if (inventoryItems.isEmpty() && Microbot.isLoggedIn()) {
+            Microbot.getClientThread().runOnClientThreadOptional(() -> {
+                final ItemContainer itemContainer = Microbot.getClient().getItemContainer(InventoryID.INV);
+                if (itemContainer == null) return null;
+                List<Rs2ItemModel> _inventoryItems = new ArrayList<>();
+                for (int i = 0; i < itemContainer.getItems().length; i++) {
+                    final Item item = itemContainer.getItems()[i];
+                    if (item.getId() == -1) continue;
+                    final ItemComposition itemComposition = Microbot.getClient().getItemDefinition(item.getId());
+                    _inventoryItems.add(new Rs2ItemModel(item, itemComposition, i));
+                }
+                inventoryItems = Collections.unmodifiableList(_inventoryItems);
+                return null;
+            });
+        }
         return inventoryItems.stream();
     }
 
@@ -306,7 +322,8 @@ public class Rs2Inventory {
      * @return True if the inventory contains all the specified IDs, false otherwise.
      */
     public static boolean containsAll(int... ids) {
-        return Arrays.stream(ids).allMatch(Rs2Inventory::contains);
+        Set<Integer> present = inventoryItems.stream().map(Rs2ItemModel::getId).collect(Collectors.toSet());
+        return Arrays.stream(ids).allMatch(present::contains);
     }
 
     /**
@@ -317,7 +334,12 @@ public class Rs2Inventory {
      * @return True if the inventory contains all the specified names, false otherwise.
      */
     public static boolean containsAll(String... names) {
-        return Arrays.stream(names).allMatch(Rs2Inventory::contains);
+        Set<String> present = inventoryItems.stream()
+                .map(Rs2ItemModel::getName)
+                .filter(Objects::nonNull)
+                .map(String::toLowerCase)
+                .collect(Collectors.toSet());
+        return Arrays.stream(names).allMatch(name -> present.contains(name.toLowerCase()));
     }
 
     /**
@@ -442,7 +464,7 @@ public class Rs2Inventory {
     public static boolean dropAll(Predicate<Rs2ItemModel> predicate) {
         items(predicate).forEachOrdered(item -> {
             drop(item);
-            if (!Rs2AntibanSettings.naturalMouse) sleep(150, 300);
+            sleep(150, 300);
         });
         return true;
     }
@@ -495,8 +517,7 @@ public class Rs2Inventory {
         for (Rs2ItemModel item : itemsToDrop) {
             if (item == null) continue;
             invokeMenu(item, "Drop");
-            if (!Rs2AntibanSettings.naturalMouse)
-                sleep(150, 300);
+            sleep(150, 300);
         }
         return true;
     }
@@ -603,11 +624,10 @@ public class Rs2Inventory {
             
             invokeMenu(item, "Drop");
             droppedCount++;
-            
-            if (!Rs2AntibanSettings.naturalMouse)
-                sleep(150, 300);
+
+            sleep(150, 300);
         }
-        
+
         return droppedCount;
     }
 
@@ -637,11 +657,10 @@ public class Rs2Inventory {
             
             invokeMenu(item, "Drop");
             droppedCount++;
-            
-            if (!Rs2AntibanSettings.naturalMouse)
-                sleep(150, 300);
+
+            sleep(150, 300);
         }
-        
+
         return droppedCount;
     }
 
@@ -666,8 +685,15 @@ public class Rs2Inventory {
      */
     public static boolean dropAllExcept(int gpValue, String[] ignoreItems) {
         final Predicate<Rs2ItemModel> ignore = item -> Arrays.stream(ignoreItems).anyMatch(x -> x.equalsIgnoreCase(item.getName()));
-        final Predicate<Rs2ItemModel> price = item -> (long) Microbot.getClientThread().runOnClientThreadOptional(() ->
-                Microbot.getItemManager().getItemPrice(item.getId()) * item.getQuantity()).orElse(0) >= gpValue;
+        final List<Rs2ItemModel> inventorySnapshot = items().collect(Collectors.toList());
+        final Map<Integer, Long> priceMap = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Map<Integer, Long> map = new HashMap<>();
+            for (Rs2ItemModel item : inventorySnapshot) {
+                map.put(item.getSlot(), (long) Microbot.getItemManager().getItemPrice(item.getId()) * item.getQuantity());
+            }
+            return map;
+        }).orElse(Collections.emptyMap());
+        final Predicate<Rs2ItemModel> price = item -> priceMap.getOrDefault(item.getSlot(), 0L) >= gpValue;
         return dropAllExcept(ignore.or(price));
     }
 
@@ -708,8 +734,7 @@ public class Rs2Inventory {
      * @return The last item that matches the ID, or null if not found.
      */
     public static Rs2ItemModel getLast(int id) {
-        final Rs2ItemModel[] items = items(item -> item.getId() == id).toArray(Rs2ItemModel[]::new);
-        return items.length == 0 ? null : items[items.length-1];
+        return items(item -> item.getId() == id).reduce((a, b) -> b).orElse(null);
     }
 
     /**
@@ -1033,12 +1058,7 @@ public class Rs2Inventory {
      * @return The index of the first empty slot, or -1 if none are found.
      */
     public static int getFirstEmptySlot() {
-        // TODO: might be broken
-        if (isFull()) return -1;
-        for (int i = 0; i < inventory().getItems().length; i++) {
-            if (inventory().getItems()[i].getId() == -1) return i;
-        }
-        return -1;
+        return IntStream.range(0, CAPACITY).filter(i -> inventoryItems.stream().noneMatch(x -> x.getSlot() == i)).findFirst().orElse(-1);
     }
 
     /**
@@ -1939,6 +1959,10 @@ public class Rs2Inventory {
             }
         }
 
+
+  /*      if (identifier > 5) {
+            menuAction = MenuAction.CC_OP_LOW_PRIORITY;
+        }*/
 
         if (isItemSelected()) {
             menuAction = MenuAction.WIDGET_TARGET_ON_WIDGET;

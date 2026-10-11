@@ -25,6 +25,7 @@
 package net.runelite.client.plugins.microbot.ui;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.html.HtmlEscapers;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.Config;
@@ -43,8 +44,11 @@ import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.microbot.MicrobotConfig;
 import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager;
+import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManifest;
 import net.runelite.client.plugins.microbot.ui.search.MicrobotPluginSearch;
 import net.runelite.client.ui.ColorScheme;
+import net.runelite.client.ui.ContainableFrame;
+import net.runelite.client.ui.DynamicGridLayout;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.ui.components.IconTextField;
 import net.runelite.client.util.Text;
@@ -58,9 +62,12 @@ import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -68,6 +75,10 @@ import java.util.stream.Stream;
 @Slf4j
 @Singleton
 public class MicrobotPluginListPanel extends MicrobotPluginPanel {
+    private static final long BLOCKED_NOTICE_WAIT_MS = 300_000;
+    static final int LIST_VIEW_WIDTH = PluginPanel.PANEL_WIDTH - PluginPanel.SCROLLBAR_WIDTH;
+    static final int LIST_ITEM_WIDTH = LIST_VIEW_WIDTH - 20;
+
     private static final String RUNELITE_GROUP_NAME = MicrobotConfig.class.getAnnotation(ConfigGroup.class).value();
     private static final String PINNED_PLUGINS_CONFIG_KEY = "pinnedPlugins";
     private static final ImmutableList<String> CATEGORY_TAGS = ImmutableList.of(
@@ -158,17 +169,18 @@ public class MicrobotPluginListPanel extends MicrobotPluginPanel {
         topPanel.add(searchBar, BorderLayout.CENTER);
         add(topPanel, BorderLayout.NORTH);
 
-        mainPanel = new MicrobotFixedWidthPanel();
+        mainPanel = new MicrobotFixedWidthPanel(LIST_VIEW_WIDTH);
         mainPanel.setBorder(new EmptyBorder(8, 10, 10, 10));
-        mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
+        mainPanel.setLayout(new DynamicGridLayout(0, 1, 0, 5));
         mainPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JPanel northPanel = new MicrobotFixedWidthPanel();
+        JPanel northPanel = new MicrobotFixedWidthPanel(LIST_VIEW_WIDTH);
         northPanel.setLayout(new BorderLayout());
         northPanel.add(mainPanel, BorderLayout.NORTH);
 
         scrollPane = new JScrollPane(northPanel);
         scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS);
         add(scrollPane, BorderLayout.CENTER);
     }
 
@@ -178,16 +190,14 @@ public class MicrobotPluginListPanel extends MicrobotPluginPanel {
         Predicate<Plugin> isMicrobotPlugin = plugin ->
                 plugin.getClass().getPackage().getName().toLowerCase().contains("microbot");
 
-        // Might add a different check later if needed, but for now, we consider external plugins as those
-        Predicate<Plugin> isExternalPlugin = plugin ->
-                plugin.getClass().getAnnotation(PluginDescriptor.class).isExternal();
-
         // populate pluginList with all non-hidden plugins
         pluginList = Stream.concat(
                         fakePlugins.stream(),
                         pluginManager.getPlugins().stream()
-                                .filter(plugin -> !plugin.getClass().getAnnotation(PluginDescriptor.class).hidden())
-                                .filter(isMicrobotPlugin.or(isExternalPlugin))
+                                .filter(plugin -> {
+                                    PluginDescriptor d = plugin.getClass().getAnnotation(PluginDescriptor.class);
+                                    return !d.hidden() && (isMicrobotPlugin.test(plugin) || d.isExternal());
+                                })
                                 .map(plugin ->
                                 {
                                     PluginDescriptor descriptor = plugin.getClass().getAnnotation(PluginDescriptor.class);
@@ -218,6 +228,7 @@ public class MicrobotPluginListPanel extends MicrobotPluginPanel {
 
         mainPanel.removeAll();
         refresh();
+        SwingUtilities.invokeLater(this::showBlockedPluginsNotice);
     }
 
     public void addFakePlugin(MicrobotPluginConfigurationDescriptor... descriptor) {
@@ -282,6 +293,9 @@ public class MicrobotPluginListPanel extends MicrobotPluginPanel {
     }
 
     void startPlugin(Plugin plugin) {
+        microbotPluginManager.getOutdatedPluginUpdate(plugin)
+                .ifPresent(this::showOutdatedPluginNotification);
+
         pluginManager.setPluginEnabled(plugin, true);
 
         try {
@@ -292,6 +306,10 @@ public class MicrobotPluginListPanel extends MicrobotPluginPanel {
     }
 
     void stopPlugin(Plugin plugin) {
+        if (pluginManager.isPluginAlwaysOn(plugin)) {
+            return;
+        }
+
         pluginManager.setPluginEnabled(plugin, false);
 
         try {
@@ -309,6 +327,70 @@ public class MicrobotPluginListPanel extends MicrobotPluginPanel {
         }
 
         return Text.fromCSV(config);
+    }
+
+    private void showOutdatedPluginNotification(MicrobotPluginManager.OutdatedPluginUpdate outdatedPluginUpdate) {
+        String message = "<html>\""
+                + HtmlEscapers.htmlEscaper().escape(outdatedPluginUpdate.getDisplayName())
+                + "\" is out of date.<br><br>Installed version: "
+                + HtmlEscapers.htmlEscaper().escape(outdatedPluginUpdate.getInstalledVersion())
+                + "<br>Latest version: "
+                + HtmlEscapers.htmlEscaper().escape(outdatedPluginUpdate.getLatestVersion())
+                + "<br><br>Update it from the <strong>Microbot Plugin Hub</strong> to get the latest fixes.</html>";
+
+        JOptionPane.showMessageDialog(
+                this,
+                message,
+                "Microbot Plugin Update Available",
+                JOptionPane.INFORMATION_MESSAGE
+        );
+
+        microbotPluginManager.rememberOutdatedPluginUpdateNotification(outdatedPluginUpdate);
+    }
+
+    private void showBlockedPluginsNotice() {
+        Map<String, String> blocked = microbotPluginManager.takeBlockedPluginsToNotify();
+        if (blocked.isEmpty()) {
+            return;
+        }
+
+        Map<String, MicrobotPluginManifest> manifests = microbotPluginManager.getManifestMap();
+        String message = blockedPluginsMessage(blocked, name -> {
+            MicrobotPluginManifest manifest = manifests.get(name);
+            return manifest == null || manifest.getDisplayName() == null ? name : manifest.getDisplayName();
+        });
+
+        long deadline = System.currentTimeMillis() + BLOCKED_NOTICE_WAIT_MS;
+        Timer timer = new Timer(1000, null);
+        timer.setInitialDelay(0);
+        timer.addActionListener(e -> {
+            Window window = Arrays.stream(Window.getWindows())
+                    .filter(w -> w instanceof ContainableFrame && w.isShowing())
+                    .findFirst()
+                    .orElse(null);
+            if (window == null) {
+                if (System.currentTimeMillis() > deadline) {
+                    timer.stop();
+                }
+                return;
+            }
+            timer.stop();
+            JDialog dialog = new JOptionPane(message, JOptionPane.WARNING_MESSAGE)
+                    .createDialog(window, "Microbot Plugins Not Loaded");
+            dialog.setModal(false);
+            dialog.setVisible(true);
+        });
+        timer.start();
+    }
+
+    static String blockedPluginsMessage(Map<String, String> blocked, Function<String, String> displayName) {
+        StringBuilder message = new StringBuilder("<html>These Microbot Plugin Hub plugins were not loaded:<br>");
+        blocked.forEach((name, reason) -> message.append("<br>&bull; <b>")
+                .append(HtmlEscapers.htmlEscaper().escape(displayName.apply(name)))
+                .append("</b>: ")
+                .append(HtmlEscapers.htmlEscaper().escape(reason)));
+        return message.append("<br><br>Open the <strong>Microbot Plugin Hub</strong> to see details, remove them or install an unaffected version.</html>")
+                .toString();
     }
 
     void savePinnedPlugins() {

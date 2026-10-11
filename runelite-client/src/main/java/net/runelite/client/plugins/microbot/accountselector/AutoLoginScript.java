@@ -15,6 +15,7 @@ import net.runelite.client.plugins.microbot.util.world.Rs2WorldUtil;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -26,6 +27,18 @@ public class AutoLoginScript extends Script {
 
     // ban detection constants
     private static final int BANNED_LOGIN_INDEX = 14;
+
+    static final int[] BACKOFF_SEQUENCE_SECONDS = {5, 15, 60, 300};
+
+    static int computeRetryBackoffSeconds(int attemptsSoFar, int configuredBaseSeconds) {
+        int idx = Math.min(Math.max(attemptsSoFar - 1, 0), BACKOFF_SEQUENCE_SECONDS.length - 1);
+        int scheduleStep = BACKOFF_SEQUENCE_SECONDS[idx];
+        int floor = Math.max(1, configuredBaseSeconds);
+        int step = Math.max(scheduleStep, floor);
+        double jitter = 0.7 + ThreadLocalRandom.current().nextDouble() * 0.6;
+        long jittered = Math.round(step * jitter);
+        return (int) Math.max(floor, jittered);
+    }
 
     // ban detection state
     public static boolean isBanned = false;
@@ -133,11 +146,12 @@ public class AutoLoginScript extends Script {
             }
         }
 
-        // check if enough time has passed for retry
+        // check if enough time has passed for retry — uses exponential backoff
         if (lastLoginAttemptTime != null) {
             long timeSinceLastAttempt = Duration.between(lastLoginAttemptTime, Instant.now()).toSeconds();
-            if (timeSinceLastAttempt < config.loginRetryDelay()) {
-                return; // wait for retry delay
+            int backoff = computeRetryBackoffSeconds(retryCount, config.loginRetryDelay());
+            if (timeSinceLastAttempt < backoff) {
+                return;
             }
         }
 
@@ -243,24 +257,27 @@ public class AutoLoginScript extends Script {
 
             boolean membersOnly = config.membersOnly();
 
+            if (config.usePreferredWorld() && config.world() > 0) {
+                targetWorld = config.world();
+                log.info("Using preferred world from config: {}", targetWorld);
+            }
+
             // use world selection mode if no preferred world or preferred world not accessible
             if (targetWorld == -1) {
                 switch (config.worldSelectionMode()) {
                     case CURRENT_PREFERRED_WORLD:
-                        boolean isAccessible = Rs2WorldUtil.canAccessWorld(config.world());
-
-                        if (isAccessible) {
+                        if (config.world() > 0) {
                             targetWorld = config.world();
-                            log.info("Using preferred world: {}", targetWorld);
+                            log.info("Using preferred world from config: {}", targetWorld);
                         } else {
-                            ConfigProfile activeProfile = LoginManager.getActiveProfile();
-                            boolean isMemberFromProfile = activeProfile != null && activeProfile.isMember();
-                            boolean isLocalPlayerAvailable = Microbot.getClient() != null && Microbot.getClient().getLocalPlayer() != null;
-                            boolean isMemberFromClient = Microbot.getClient() != null && Microbot.getClient().getLocalPlayer() != null ? Rs2Player.isMember() : false;
-                            log.error("Preferred world {} is not accessible,\n\t ->check if we have member access set in profile(current value {}), or when logged in, have we member access ? (LocalPlayer? {}, isMember? {})",
-                                    config.usePreferredWorld(), isMemberFromProfile, isLocalPlayerAvailable, isMemberFromClient);
+                            ConfigProfile cpProfile = LoginManager.getActiveProfile();
+                            if (cpProfile != null && cpProfile.getSelectedWorld() != null && cpProfile.getSelectedWorld() > 0) {
+                                targetWorld = cpProfile.getSelectedWorld();
+                                log.info("Using preferred world from profile: {}", targetWorld);
+                            } else {
+                                log.warn("No preferred world configured for CURRENT_PREFERRED_WORLD mode");
+                            }
                         }
-                        // no specific world selection - use default login
                         break;
 
                     case RANDOM_WORLD:

@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.util.player;
 
 import lombok.Getter;
 import net.runelite.api.*;
+import net.runelite.api.Point;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
@@ -15,6 +16,7 @@ import net.runelite.api.widgets.WidgetInfo;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.api.boat.Rs2BoatCache;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
+import net.runelite.client.plugins.microbot.api.playerstate.Rs2PlayerStateCache;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldPoint;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
@@ -41,6 +43,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -66,7 +70,7 @@ public class Rs2Player {
     public static int moonlightTime = -1;
     public static Instant lastAnimationTime = null;
     private static final long COMBAT_TIMEOUT_MS = 10000;
-    private static long lastCombatTime = 0;
+    private static volatile long lastCombatTime = 0;
     @Getter
     public static int lastAnimationID = AnimationID.IDLE;
 
@@ -407,24 +411,56 @@ public class Rs2Player {
         return false;
     }
 
+    private static final ReentrantLock RUN_TOGGLE_LOCK = new ReentrantLock();
+    private static final long RUN_TOGGLE_RETRY_NANOS = TimeUnit.MILLISECONDS.toNanos(1200);
+    private static long lastRunToggleAttempt;
+    private static boolean runToggleAttempted;
+
     /**
-     * Toggles the player's run energy on or off.
+     * Requests the desired run state. Enabling requires energy strictly above
+     * {@link Microbot#runEnergyThreshold} (hundredths of a percent; default 1000 = 10%).
+     * Disabling and an already satisfied state do not require energy.
      *
-     * @param toggle {@code true} to enable running, {@code false} to disable it.
-     * @return {@code true} if the toggle action was performed successfully or was already in the desired state,
-     *         {@code false} if the run energy toggle widget was not found.
+     * @return true only when the desired state is observed; false includes a pending click,
+     *         insufficient energy, unavailable orb, retry cooldown, or a client-thread request
+     *         that would require a mouse gesture. Call again from the normal script loop.
      */
     public static boolean toggleRunEnergy(boolean toggle) {
-        if (Microbot.getVarbitPlayerValue(173) == 0 && !toggle) return true;
-        if (Microbot.getVarbitPlayerValue(173) == 1 && toggle) return true;
-
-        Widget widget = Rs2Widget.getWidget(WidgetInfo.MINIMAP_TOGGLE_RUN_ORB.getId());
-        if (widget == null) return false;
-
-        Microbot.getMouse().click(widget.getCanvasLocation());
-        sleep(150, 300);
-
-        return true;
+        if (Thread.currentThread().isInterrupted() || !RUN_TOGGLE_LOCK.tryLock()) return false;
+        try {
+            Boolean satisfied = Microbot.getClientThread().runOnClientThreadOptional(() ->
+                    Microbot.getClient().getGameState() == GameState.LOGGED_IN
+                            && (Microbot.getClient().getVarpValue(173) == 1) == toggle).orElse(false);
+            if (satisfied) return true;
+            if (Microbot.getClientThread().isClientThread()) return false;
+            if (runToggleAttempted && System.nanoTime() - lastRunToggleAttempt < RUN_TOGGLE_RETRY_NANOS) {
+                return false;
+            }
+            Point target = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+                Client client = Microbot.getClient();
+                if (client.getGameState() != GameState.LOGGED_IN
+                        || (client.getVarpValue(173) == 1) == toggle
+                        || (toggle && client.getEnergy() <= Math.max(0, Microbot.runEnergyThreshold))) return null;
+                Widget widget = Rs2Widget.getWidget(WidgetInfo.MINIMAP_TOGGLE_RUN_ORB.getId());
+                if (widget == null || widget.isHidden()) return null;
+                Rectangle bounds = widget.getBounds();
+                if (bounds == null || bounds.width < 3 || bounds.height < 3 || bounds.x < 0 || bounds.y < 0
+                        || !Rs2UiHelper.isRectangleWithinCanvas(bounds)) return null;
+                return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+            }).orElse(null);
+            if (target == null) return false;
+            try {
+                Microbot.getMouse().click(target);
+            } finally {
+                lastRunToggleAttempt = System.nanoTime();
+                runToggleAttempted = true;
+            }
+            return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                    Microbot.getClient().getGameState() == GameState.LOGGED_IN
+                            && (Microbot.getClient().getVarpValue(173) == 1) == toggle).orElse(false);
+        } finally {
+            RUN_TOGGLE_LOCK.unlock();
+        }
     }
 
     /**
@@ -953,22 +989,59 @@ public class Rs2Player {
         });
     }
 
-    /**
-     * Retrieves the player's current world location as a {@link WorldPoint}.
-     *
-     * <p>If the player is in an instanced world, the method converts the local position 
-     * to an instanced {@link WorldPoint}. Otherwise, it returns the player's standard 
-     * world location.</p>
-     *
-     * @return The {@link WorldPoint} representing the player's current location.
-     */
-    public static WorldPoint getWorldLocation() {
-        if (Microbot.getClient().getTopLevelWorldView().getScene().isInstance()) {
-            LocalPoint l = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), Microbot.getClient().getLocalPlayer().getWorldLocation());
-            return WorldPoint.fromLocalInstance(Microbot.getClient(), l);
-        }
-        return Microbot.getClient().getLocalPlayer().getWorldLocation();
-    }
+	/**
+	 * Retrieves the player's current world location as a {@link WorldPoint} from the client thread.
+	 *
+	 * <p>If the player is in an instanced world, the method converts the local position
+	 * to an instanced {@link WorldPoint}. Otherwise, it returns the player's standard
+	 * world location.</p>
+	 *
+	 * @return The {@link WorldPoint} representing the player's current location, or {@code null} if unavailable.
+	 */
+	public static WorldPoint getWorldLocation_Internal(){
+		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+			if (Microbot.getClient().getTopLevelWorldView().getScene().isInstance()) {
+				LocalPoint l = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), Microbot.getClient().getLocalPlayer().getWorldLocation());
+				return WorldPoint.fromLocalInstance(Microbot.getClient(), l);
+			}
+			return Microbot.getClient().getLocalPlayer().getWorldLocation();
+		}).orElse(null);
+	}
+
+	/**
+	 * Retrieves the player's current {@link WorldView} from the client thread.
+	 *
+	 * @return The {@link WorldView} representing the player's current world view, or {@code null} if unavailable.
+	 */
+	public static WorldView getWorldView_Internal() {
+		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+			Player player = Microbot.getClient().getLocalPlayer();
+			if (player == null) return null;
+			return player.getWorldView();
+		}).orElse(null);
+	}
+
+	/**
+	 * Retrieves the player's current world location as a {@link WorldPoint}.
+	 *
+	 * <p>If the player is in an instanced world, the method converts the local position
+	 * to an instanced {@link WorldPoint}. Otherwise, it returns the player's standard
+	 * world location.</p>
+	 *
+	 * @return The {@link WorldPoint} representing the player's current location.
+	 */
+	public static WorldPoint getWorldLocation() {
+		return Microbot.getRs2PlayerStateCache().getLocalPlayerPosition();
+	}
+
+	/**
+	 * Retrieves the player's current {@link WorldView}.
+	 *
+	 * @return The {@link WorldView} representing the player's current world view, or {@code null} if unavailable.
+	 */
+	public static WorldView getWorldView() {
+		return Microbot.getRs2PlayerStateCache().getLocalPlayerWorldView();
+	}
 
     /**
      * Retrieves the player's current location as an {@link Rs2WorldPoint}.
@@ -1115,6 +1188,24 @@ public class Rs2Player {
                 == 1;
     }
 
+    /**
+     * Checks if the player is currently inside their Player Owned House (POH).
+     *
+     * <p>This is detected by verifying two conditions:</p>
+     * <ul>
+     *     <li>The current scene is an instanced region (all POHs are instanced).</li>
+     *     <li>The {@link VarbitID#POH_HOUSE_LOCATION} varbit is non-zero, which is
+     *         set whenever the player is inside a POH. This distinguishes the POH from
+     *         other instanced regions such as the Gauntlet or Hallowed Sepulchre.</li>
+     * </ul>
+     *
+     * @return {@code true} if the player is inside a POH, {@code false} otherwise.
+     */
+    public static boolean isInPoh() {
+        return Microbot.getClient().getTopLevelWorldView().getScene().isInstance()
+                && Microbot.getVarbitValue(VarbitID.POH_HOUSE_LOCATION) > 0;
+    }
+
     public static boolean drinkPrayerPotion() {
         int maxPrayer = getRealSkillLevel(Skill.PRAYER);
         int maxHerblore = getRealSkillLevel(Skill.HERBLORE);
@@ -1122,7 +1213,7 @@ public class Rs2Player {
 
         if (hasPotion("moonlight moth mix")) {
             restoreAmount = 22;
-        } else if (hasPotion("moonlight potion")) {
+        } else if (hasPotion("moonlight potion") || hasPotion("moonlight moth")) {
             int prayerRestore = (maxPrayer / 4) + 7;
             int herbloreRestore = (int) Math.floor((maxHerblore * 3.0 / 10.0)) + 7;
             restoreAmount = Math.max(prayerRestore, herbloreRestore);
@@ -1342,7 +1433,15 @@ public class Rs2Player {
 
         if (potion == null) return false;
 
-        return Rs2Inventory.interact(potion, "drink");
+        String action = Arrays.stream(potion.getInventoryActions())
+                .filter(a -> a != null && a.equalsIgnoreCase("drink"))
+                .findFirst()
+                .orElseGet(() -> Arrays.stream(potion.getInventoryActions())
+                        .filter(a -> a != null && a.equalsIgnoreCase("release"))
+                        .findFirst()
+                        .orElse("drink"));
+
+        return Rs2Inventory.interact(potion, action);
     }
     
     /**
@@ -1416,8 +1515,10 @@ public class Rs2Player {
      * @return The animation ID of the player's current action, or {@code -1} if the player is null.
      */
     public static int getAnimation() {
-        if (Microbot.getClient() == null || Microbot.getClient().getLocalPlayer() == null) return -1;
-        return Microbot.getClient().getLocalPlayer().getAnimation();
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            if (Microbot.getClient() == null || Microbot.getClient().getLocalPlayer() == null) return -1;
+            return Microbot.getClient().getLocalPlayer().getAnimation();
+        }).orElse(-1);
     }
 
     /**
@@ -1426,7 +1527,9 @@ public class Rs2Player {
      * @return The pose animation ID of the player.
      */
     public static int getPoseAnimation() {
-        return Microbot.getClient().getLocalPlayer().getPoseAnimation();
+        return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                Microbot.getClient().getLocalPlayer().getPoseAnimation()
+        ).orElse(-1);
     }
 
     /**
@@ -1446,7 +1549,9 @@ public class Rs2Player {
      * @return The player's real level for the specified skill.
      */
     public static int getRealSkillLevel(Skill skill) {
-        return Microbot.getClient().getRealSkillLevel(skill);
+        return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                Microbot.getClient().getRealSkillLevel(skill)
+        ).orElse(0);
     }
 
     /**
@@ -1455,8 +1560,10 @@ public class Rs2Player {
      * @param skill The {@link Skill} to check.
      * @return The player's boosted level for the specified skill.
      */
-    public static int getBoostedSkillLevel(Skill skill) {        
-        return Microbot.getClient().getBoostedSkillLevel(skill);
+    public static int getBoostedSkillLevel(Skill skill) {
+        return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                Microbot.getClient().getBoostedSkillLevel(skill)
+        ).orElse(0);
     }
 
     /**
@@ -1595,7 +1702,7 @@ public class Rs2Player {
      * @return The player's run energy as an integer percentage (0-100).
      */
     public static int getRunEnergy() {
-        return Microbot.getClient().getEnergy() / 100;
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> Microbot.getClient().getEnergy()).orElse(0) / 100;
     }
 
     /**

@@ -96,6 +96,23 @@ public abstract class AbstractEntityQueryable<
 
     @SuppressWarnings("unchecked")
     @Override
+    public Q withNameContains(String substring) {
+        if (substring == null || substring.isEmpty()) {
+            this.source = Stream.empty();
+            return (Q) this;
+        }
+
+        String needle = substring.toLowerCase();
+        this.source = this.source.filter(x -> {
+            String n = x.getName();
+            return n != null && n.toLowerCase().contains(needle);
+        });
+
+        return (Q) this;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
     public Q withNames(String... names) {
         if (names == null || names.length == 0) {
             this.source = Stream.empty();
@@ -154,26 +171,49 @@ public abstract class AbstractEntityQueryable<
 
     @Override
     public E nearestReachable() {
-        source = source.filter(IEntity::isReachable);
-        return nearest(Integer.MAX_VALUE);
+        return nearestReachable(Integer.MAX_VALUE);
     }
 
     @Override
     public E nearestReachable(int maxDistance) {
-        source = source.filter(IEntity::isReachable);
-        return nearest(maxDistance);
+        try {
+            var player = new Rs2PlayerModel();
+            WorldPoint playerLoc = player.getWorldLocation();
+            WorldView worldView = player.getWorldView();
+            if (playerLoc == null || worldView == null) {
+                return null;
+            }
+
+            return source
+                    .filter(IEntity::isReachable)
+                    .map(entity -> {
+                        WorldPoint loc = entity.getWorldLocation();
+                        int distance = (loc != null) ? loc.distanceTo(playerLoc) : Integer.MAX_VALUE;
+                        return new EntityDistance<>(entity, distance);
+                    })
+                    .filter(pair -> pair.distance <= maxDistance)
+                    .min(Comparator.comparingInt(pair -> pair.distance))
+                    .map(pair -> pair.entity)
+                    .orElse(null);
+        } catch (RuntimeException e) {
+            return returnNullIfInterrupted(e);
+        }
     }
 
     @Override
     public E nearest(int maxDistance) {
-        var player = new Rs2PlayerModel();
-        WorldPoint playerLoc = player.getWorldLocation();
-        WorldView worldView = player.getWorldView();
-        if (playerLoc == null || worldView == null) {
-            return null;
-        }
+        try {
+            var player = new Rs2PlayerModel();
+            WorldPoint playerLoc = player.getWorldLocation();
+            WorldView worldView = player.getWorldView();
+            if (playerLoc == null || worldView == null) {
+                return null;
+            }
 
-        return nearest(playerLoc, maxDistance);
+            return nearest(playerLoc, maxDistance);
+        } catch (RuntimeException e) {
+            return returnNullIfInterrupted(e);
+        }
     }
 
     @Override
@@ -182,21 +222,37 @@ public abstract class AbstractEntityQueryable<
             return null;
         }
 
-        return source
-                .map(entity -> {
-                    WorldPoint loc = entity.getWorldLocation();
-                    int distance = (loc != null) ? loc.distanceTo(anchor) : Integer.MAX_VALUE;
-                    return new EntityDistance<>(entity, distance);
-                })
-                .filter(pair -> pair.distance <= maxDistance)
-                .min(Comparator.comparingInt(pair -> pair.distance))
-                .map(pair -> pair.entity)
-                .orElse(null);
+        try {
+            return source
+                    .map(entity -> {
+                        WorldPoint loc = entity.getWorldLocation();
+                        int distance = (loc != null) ? loc.distanceTo(anchor) : Integer.MAX_VALUE;
+                        return new EntityDistance<>(entity, distance);
+                    })
+                    .filter(pair -> pair.distance <= maxDistance)
+                    .min(Comparator.comparingInt(pair -> pair.distance))
+                    .map(pair -> pair.entity)
+                    .orElse(null);
+        } catch (RuntimeException e) {
+            return returnNullIfInterrupted(e);
+        }
+    }
+
+    private E returnNullIfInterrupted(RuntimeException e) {
+        if (Thread.currentThread().isInterrupted() || e.getCause() instanceof InterruptedException) {
+            return null;
+        }
+        throw e;
     }
 
     @Override
     public List<E> toList() {
         return source.collect(Collectors.toList());
+    }
+
+    @Override
+    public int count() {
+        return (int) source.count();
     }
 
     public E firstOnClientThread() {

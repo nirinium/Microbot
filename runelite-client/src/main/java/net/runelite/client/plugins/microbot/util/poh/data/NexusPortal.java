@@ -84,7 +84,15 @@ public enum NexusPortal implements PohTeleport {
         return PohTeleports.usePortalNexus(this);
     }
 
-    public final static Integer[] PORTAL_IDS = {ObjectID.POH_NEXUS_PORTAL_1, ObjectID.POH_NEXUS_PORTAL_2, ObjectID.POH_NEXUS_PORTAL_3, ObjectID.POH_NEXUS_PORTAL_LEAGUE_5};
+    public final static Integer[] PORTAL_IDS = {
+            // Portal-style Nexus (standalone portal object)
+            ObjectID.POH_NEXUS_PORTAL_1, ObjectID.POH_NEXUS_PORTAL_2, ObjectID.POH_NEXUS_PORTAL_3, ObjectID.POH_NEXUS_PORTAL_LEAGUE_5,
+            // Teleportation Chamber variants (the Nexus that appears inside a decorated room)
+            ObjectID.POH_TELENEXUS_1, ObjectID.POH_TELENEXUS_2_MIDDLE, ObjectID.POH_TELENEXUS_2_SIDE,
+            ObjectID.POH_TELENEXUS_2_CORNER, ObjectID.POH_TELENEXUS_3,
+            // Amulet-topped Nexus variants
+            ObjectID.POH_NEXUS_4_AMULET, ObjectID.POH_NEXUS_5_AMULET
+    };
 
     public static boolean isNexusPortal(GameObject go) {
         if (go == null) return false;
@@ -107,10 +115,20 @@ public enum NexusPortal implements PohTeleport {
                 }
                 continue;
             }
-            NexusPortal tp = NexusPortal.values()[value];
-            teleports.add(tp);
+            NexusPortal tp = fromVarbitValue(value);
+            if (tp != null) {
+                if (!teleports.contains(tp)) teleports.add(tp);
+            } else {
+                Microbot.log("POH Nexus: unsupported destination value " + value + "; skipping this slot.");
+            }
         }
         return teleports;
+    }
+
+    static NexusPortal fromVarbitValue(int value) {
+        if (value == 1) return VARROCK;
+        NexusPortal[] destinations = values();
+        return value > 1 && value < destinations.length ? destinations[value] : null;
     }
 
     public static final int[] VARBITS = new int[]{

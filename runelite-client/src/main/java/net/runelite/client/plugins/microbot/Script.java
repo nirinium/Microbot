@@ -3,10 +3,14 @@ package net.runelite.client.plugins.microbot;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.coords.WorldPoint;
-import net.runelite.client.plugins.microbot.shortestpath.ShortestPathPlugin;
 import net.runelite.client.plugins.microbot.util.Global;
+import net.runelite.client.plugins.microbot.agentserver.handler.ScriptHeartbeatRegistry;
+import net.runelite.client.plugins.microbot.util.antiban.SessionFatigue;
+import net.runelite.client.plugins.microbot.util.input.InputArbiter;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import org.jetbrains.annotations.NotNull;
 
@@ -29,6 +33,7 @@ public abstract class Script extends Global implements IScript {
             public Thread newThread(@NotNull Runnable r) {
                 Thread t = new Thread(r);
                 t.setName(Script.this.getClass().getSimpleName() + "-" + threadNumber.getAndIncrement());
+                t.setDaemon(true);
                 return t;
             }
         });
@@ -50,16 +55,19 @@ public abstract class Script extends Global implements IScript {
      * Safe to call multiple times; no-ops if already shut down.
      */
     public void shutdown() {
+        ScriptHeartbeatRegistry.remove(this.getClass().getName());
         if (mainScheduledFuture != null && !mainScheduledFuture.isDone()) {
             mainScheduledFuture.cancel(true);
-            ShortestPathPlugin.exit();
+            Rs2PathApi.exit();
             if (Microbot.getClientThread().scheduledFuture != null)
                 Microbot.getClientThread().scheduledFuture.cancel(true);
             initialPlayerLocation = null;
+            // Backstop for a script stopped between a hold and its release. Fires inconsistently:
+            // most scripts catch-and-continue without reaching here.
+            Rs2Keyboard.releaseHeldKeys();
             Microbot.pauseAllScripts.set(false);
             Rs2Walker.disableTeleports = false;
             Microbot.getSpecialAttackConfigs().reset();
-            Rs2Walker.setTarget(null);
         }
         if (scheduledFuture != null && !scheduledFuture.isDone()) {
             scheduledFuture.cancel(true);
@@ -72,7 +80,12 @@ public abstract class Script extends Global implements IScript {
      * tutorial island is incomplete, or the current thread is interrupted.
      */
     public boolean run() {
-        //Avoid executing any blocking events if the player hasn't finished Tutorial Island
+        ScriptHeartbeatRegistry.recordHeartbeat(this.getClass().getName());
+
+        if (Microbot.isLoggedIn() && !SessionFatigue.isActive()) {
+            SessionFatigue.startSession();
+        }
+
         if (Microbot.isLoggedIn() && !Rs2Player.hasCompletedTutorialIsland())
             return true;
 
@@ -80,18 +93,27 @@ public abstract class Script extends Global implements IScript {
             // A blocking event was found & is executing
             return false;
         }
-        if (Microbot.pauseAllScripts.get())
+        // The arbiter keeps its own flag, so a takeover idles every script through the gate that
+        // already exists, cancelling nothing.
+        boolean humanOwnsInput = InputArbiter.isHuman();
+        if (humanOwnsInput) {
+            // A held key is not gesture-scoped, so InputLoop cannot unwind it.
+            Rs2Keyboard.releaseHeldKeys();
+        }
+        if (Microbot.pauseAllScripts.get() || humanOwnsInput)
             return false;
         if (Thread.currentThread().isInterrupted())
             return false;
 
         if (Microbot.isLoggedIn()) {
-            boolean hasRunEnergy = Microbot.getClient().getEnergy() > Microbot.runEnergyThreshold;
+            boolean hasRunEnergy = Microbot.getClientThread().runOnClientThreadOptional(() -> Microbot.getClient().getEnergy()).orElse(0) > Microbot.runEnergyThreshold;
             if (Microbot.enableAutoRunOn && hasRunEnergy)
                 Rs2Player.toggleRunEnergy(true);
             if (!hasRunEnergy && Microbot.useStaminaPotsIfNeeded && Rs2Player.isMoving()) {
                 Rs2Inventory.useRestoreEnergyItem();
             }
+            Microbot.getConfigManager().setConfiguration(MicrobotConfig.configGroup, MicrobotConfig.keyEnableAutoRunOn, Microbot.enableAutoRunOn);
+            Microbot.getConfigManager().setConfiguration(MicrobotConfig.configGroup, MicrobotConfig.keyUseStaminaPotsIfNeeded, Microbot.useStaminaPotsIfNeeded);
         }
         return true;
     }

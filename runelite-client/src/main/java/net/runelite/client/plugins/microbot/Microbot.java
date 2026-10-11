@@ -36,14 +36,20 @@ import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.loottracker.LootTrackerRecord;
 import net.runelite.client.plugins.microbot.configs.SpecialAttackConfigs;
 import net.runelite.client.plugins.microbot.pouch.PouchScript;
+import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
+import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
+import net.runelite.client.plugins.microbot.util.dialogues.Rs2Dialogue;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.shop.Rs2Shop;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
+import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.mouse.Mouse;
 import net.runelite.client.plugins.microbot.util.mouse.VirtualMouse;
 import net.runelite.client.plugins.microbot.util.mouse.naturalmouse.NaturalMouse;
 import net.runelite.client.plugins.microbot.api.boat.Rs2BoatCache;
+import net.runelite.client.plugins.microbot.util.GameTickBroadcaster;
 import net.runelite.client.plugins.microbot.api.npc.Rs2NpcCache;
 import net.runelite.client.plugins.microbot.api.player.Rs2PlayerCache;
 import net.runelite.client.plugins.microbot.api.playerstate.Rs2PlayerStateCache;
@@ -97,7 +103,15 @@ public class Microbot {
     public static boolean enableAutoRunOn = true;
     public static boolean useStaminaPotsIfNeeded = true;
     public static int runEnergyThreshold = 1000;
-    public static boolean isCantReachTargetDetectionEnabled = false;
+    /**
+     * Reactive unreachable-interaction recovery. When the game prints "I can't reach that!"
+     * (a shut door or wall between the player and a clicked NPC/object), the next interact call
+     * routes through the walker — which opens doors — before re-clicking. ON by default since
+     * 2026-08-08: it was off, nothing in the repo enabled it, and the only recovery path in the
+     * interaction layer was dead code — every script clicking through a wall stalled silently.
+     * Left as a flag so a plugin with its own recovery can opt out.
+     */
+    public static boolean isCantReachTargetDetectionEnabled = true;
 
     @Getter
     @Inject
@@ -186,9 +200,6 @@ public class Microbot {
     private static final BlockingEventManager blockingEventManager = new BlockingEventManager();
 
     @Getter
-    private static HashMap<String, Integer> scriptRuntimes = new HashMap<>();
-
-    @Getter
     private static Rs2ItemManager rs2ItemManager = new Rs2ItemManager();
 
     @Inject
@@ -215,6 +226,10 @@ public class Microbot {
     @Getter
     private static Rs2BoatCache rs2BoatCache;
 
+    @Inject
+    @Getter
+    private static GameTickBroadcaster gameTickBroadcaster;
+
     @Getter
     private static final Set<Integer> worldViewIds = ConcurrentHashMap.newKeySet();
     /**
@@ -237,6 +252,56 @@ public class Microbot {
     public static boolean isDebug() {
         return java.lang.management.ManagementFactory.getRuntimeMXBean().
                 getInputArguments().toString().contains("-agentlib:jdwp");
+    }
+
+    public static boolean isTelemetryDisabled() {
+        if (Boolean.getBoolean("microbot.disableTelemetry")) {
+            return true;
+        }
+        try {
+            net.runelite.client.config.ConfigManager cm = configManager;
+            if (cm == null) return false;
+            String value = cm.getConfiguration(MicrobotConfig.configGroup, MicrobotConfig.keyDisableTelemetry);
+            return Boolean.parseBoolean(value);
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    private static final String INSTALL_SEED_KEY = "installSeed";
+    private static volatile Long cachedInstallSeed = null;
+
+    public static long getInstallSeed() {
+        Long cached = cachedInstallSeed;
+        if (cached != null) return cached;
+        synchronized (Microbot.class) {
+            if (cachedInstallSeed != null) return cachedInstallSeed;
+            long seed = 0L;
+            try {
+                net.runelite.client.config.ConfigManager cm = configManager;
+                if (cm != null) {
+                    String stored = cm.getConfiguration(MicrobotConfig.configGroup, INSTALL_SEED_KEY);
+                    if (stored != null && !stored.isEmpty()) {
+                        try {
+                            seed = Long.parseLong(stored);
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                    if (seed == 0L) {
+                        seed = new java.security.SecureRandom().nextLong();
+                        if (seed == 0L) seed = 1L;
+                        cm.setConfiguration(MicrobotConfig.configGroup, INSTALL_SEED_KEY, Long.toString(seed));
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            if (seed == 0L) {
+                seed = new java.security.SecureRandom().nextLong();
+                if (seed == 0L) seed = 1L;
+            }
+            cachedInstallSeed = seed;
+            return seed;
+        }
     }
 
     public static int getVarbitValue(@Varbit int varbit) {
@@ -309,9 +374,13 @@ public class Microbot {
             log.error("Can't hop world, already trying to hop");
             return false;
         }
-        boolean isHopping = Microbot.getClientThread().runOnClientThreadOptional(() -> {
-            if (Microbot.getClient().getLocalPlayer() != null && Microbot.getClient().getLocalPlayer().isInteracting()) {
-                log.error("Local player is interacting, cannot hop worlds");
+        boolean hopIssued = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            if (Rs2Combat.inCombat()) {
+                log.error("Player is in combat, cannot hop worlds");
+                return false;
+            }
+            if (Rs2Bank.isOpen() || Rs2Shop.isOpen() || Rs2Dialogue.isInDialogue()) {
+                log.error("Blocking widget open (bank/shop/dialogue), cannot hop worlds");
                 return false;
             }
             if (quickHopTargetWorld != null || Microbot.getClient().getGameState() != GameState.LOGGED_IN) {
@@ -319,7 +388,7 @@ public class Microbot {
                 return false;
             }
             if (Microbot.getClient().getWorld() == worldNumber) {
-                return false;
+                return true;
             }
             World newWorld = Microbot.getWorldService().getWorlds().findWorld(worldNumber);
             if (newWorld == null) {
@@ -341,29 +410,46 @@ public class Microbot {
             Microbot.getClient().openWorldHopper();
             Microbot.getClient().hopToWorld(rsWorld);
             quickHopTargetWorld = null;
-            sleep(600);
-            sleepUntil(() -> Microbot.isHopping() || Rs2Widget.getWidget(193, 0) != null, 2000);
-            return Microbot.isHopping();
+            return true;
         }).orElse(false);
-        if (!isHopping) {
+        if (!hopIssued) {
+            log.error("Failed to hop to world {}", worldNumber);
+            return false;
+        }
+        // Wait off the client thread so sleeps actually block. The lambda above runs on
+        // the client thread, where Global.sleep / sleepUntil early-return — so any post-hop
+        // wait inside it is a no-op and the success check fires before the server has
+        // even processed the request. That's the source of "Failed to hop" spam.
+        if (Microbot.getClient().getWorld() != worldNumber) {
+            sleep(600);
+            sleepUntil(() -> Microbot.isHopping()
+                            || Microbot.getClient().getWorld() == worldNumber
+                            || Rs2Widget.getWidget(193, 0) != null, 5000);
+        }
+        boolean hopping = Microbot.isHopping() || Microbot.getClient().getWorld() == worldNumber;
+        if (!hopping) {
             Widget confirmRoot = Rs2Widget.getWidget(193, 0);
             if (confirmRoot != null) {
                 List<Widget> children = Arrays.stream(confirmRoot.getDynamicChildren()).collect(Collectors.toList());
                 Widget switchWorldWidget =
                         sleepUntilNotNull(() -> Rs2Widget.findWidget("Switch world", children, true), 2000);
-                if (switchWorldWidget != null) {
-                    boolean clicked = Rs2Widget.clickWidget(switchWorldWidget);
-                    if (clicked) {
-                        sleepUntil(Microbot::isHopping, 4000);
-                        return Microbot.isHopping();
-                    }
+                if (switchWorldWidget != null && Rs2Widget.clickWidget(switchWorldWidget)) {
+                    sleepUntil(() -> Microbot.isHopping()
+                                    || Microbot.getClient().getWorld() == worldNumber, 4000);
+                    hopping = Microbot.isHopping() || Microbot.getClient().getWorld() == worldNumber;
                 }
             }
         }
-        if (!isHopping) {
+        if (hopping) {
+            // Block until the hop fully lands so callers don't race against HOPPING/LOGIN_SCREEN.
+            sleepUntil(() -> Microbot.getClient().getWorld() == worldNumber
+                            && Microbot.getClient().getGameState() == GameState.LOGGED_IN, 15000);
+        }
+        boolean success = Microbot.getClient().getWorld() == worldNumber;
+        if (!success) {
             log.error("Failed to hop to world {}", worldNumber);
         }
-        return false;
+        return success;
     }
 
     public static void showMessage(String message) {
@@ -539,7 +625,7 @@ public class Microbot {
         Point endPoint = Rs2UiHelper.getClickingPoint(end, true);
         mouse.drag(startPoint, endPoint);
         if (!Microbot.getClient().isClientThread()) {
-            sleep(50, 80);
+            sleep(Rs2Random.logNormalBounded(50, 80));
         }
     }
 
@@ -552,7 +638,7 @@ public class Microbot {
         }
 
         if (!Microbot.getClient().isClientThread()) {
-            sleep(50, 100);
+            sleep(Rs2Random.logNormalBounded(50, 100));
         }
     }
 
@@ -563,7 +649,7 @@ public class Microbot {
 
 
         if (!Microbot.getClient().isClientThread()) {
-            sleep(50, 80);
+            sleep(Rs2Random.logNormalBounded(50, 80));
         }
     }
 

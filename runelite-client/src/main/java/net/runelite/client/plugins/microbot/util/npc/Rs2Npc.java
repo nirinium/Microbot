@@ -17,6 +17,7 @@ import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.walker.recovery.CantReachTargetRecovery;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
@@ -163,14 +164,11 @@ public class Rs2Npc {
             return Collections.emptyList();
         }
         
-        LocalPoint playerLocation = localPlayer.getLocalLocation();
-        
         return getNpcsForPlayer(x -> {
             String npcName = x.getName();
             if (npcName == null || npcName.isEmpty()) return false;
             return (exact ? npcName.equalsIgnoreCase(name) : npcName.toLowerCase().contains(name.toLowerCase()));
-        }).sorted(Comparator.comparingInt(value -> value.getLocalLocation().distanceTo(playerLocation)))
-          .collect(Collectors.toList());
+        }).collect(Collectors.toList());
     }
 
     /**
@@ -380,10 +378,7 @@ public class Rs2Npc {
      */
     public static Stream<Rs2NpcModel> getAttackableNpcs() {
         return getNpcs(npc -> npc.getCombatLevel() > 0 && !npc.isDead())
-                .filter(npc -> Rs2Player.isInMulti() || !npc.isInteracting())
-                .sorted(Comparator.comparingInt(value ->
-                        value.getLocalLocation().distanceTo(
-                                Microbot.getClient().getLocalPlayer().getLocalLocation())));
+                .filter(npc -> Rs2Player.isInMulti() || !npc.isInteracting());
     }
 
     /**
@@ -404,16 +399,17 @@ public class Rs2Npc {
      * @return A sorted {@link Stream} of {@link Rs2NpcModel} objects that the player can attack.
      */
     public static Stream<Rs2NpcModel> getAttackableNpcs(boolean reachable) {
-        Rs2WorldPoint playerLocation = new Rs2WorldPoint(Microbot.getClient().getLocalPlayer().getWorldLocation());
-        boolean isInstanced = Microbot.getClient().isInInstancedRegion();
+        Rs2WorldPoint playerLocation = new Rs2WorldPoint(Rs2Player.getWorldLocation());
 
-        return getNpcs(npc -> npc.getCombatLevel() > 0
+        Stream<Rs2NpcModel> npcs = getNpcs(npc -> npc.getCombatLevel() > 0
                 && !npc.isDead()
-                && (!reachable || isInstanced || playerLocation.distanceToPath(npc.getWorldLocation()) < Integer.MAX_VALUE)
-                && (!npc.isInteracting() || Objects.equals(npc.getInteracting(), Microbot.getClient().getLocalPlayer())))
-                .sorted(Comparator.comparingInt(value ->
-                        value.getLocalLocation().distanceTo(
-                                Microbot.getClient().getLocalPlayer().getLocalLocation())));
+                && (!npc.isInteracting() || Objects.equals(npc.getInteracting(), Microbot.getClient().getLocalPlayer())));
+
+        if (reachable) {
+            npcs = npcs.filter(npc -> playerLocation.distanceToPath(npc.getWorldLocation()) < Integer.MAX_VALUE);
+        }
+
+        return npcs;
     }
 
     /**
@@ -646,27 +642,38 @@ public class Rs2Npc {
 
         Microbot.status = action + " " + npc.getName();
         try {
-            if (Microbot.isCantReachTargetDetectionEnabled && Microbot.cantReachTarget) {
-                if (!hasLineOfSight(npc)) {
-                    if (Microbot.cantReachTargetRetries >= Rs2Random.between(3, 5)) {
-						Microbot.pauseAllScripts.compareAndSet(false, true);
-                        Microbot.showMessage("Your bot tried to interact with an NPC for "
-                                + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
-                        return false;
-                    }
-                    final WorldPoint npcWorldPoint = npc.getWorldLocation();
-                    if (npcWorldPoint == null) {
-                        log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npc.getName(), action);
-                        return false;
-                    }
-                    Rs2Walker.walkTo(Rs2Tile.getNearestWalkableTileWithLineOfSight(npcWorldPoint), 0);
-                    Microbot.pauseAllScripts.compareAndSet(true, false);
-                    Microbot.cantReachTargetRetries++;
+            if (CantReachTargetRecovery.shouldStart(
+                    Microbot.isCantReachTargetDetectionEnabled, Microbot.cantReachTarget)) {
+                // The game itself said "I can't reach that!" on the previous interaction — a shut
+                // door or wall sits between us and the target. The walker is the only recovery that
+                // OPENS doors, so walk to the NPC (doors handled en route) and re-click on arrival.
+                // The old branch selected a line-of-sight tile instead, which for an NPC behind a
+                // door picks tiles on the unreachable side — and its LOS "all clear" path cleared
+                // the flag without ever walking, so a through-window NPC clicked forever without
+                // escalating. LOS is deliberately not consulted: a ranged attack through a fence
+                // never prints can't-reach, so every trigger here genuinely needs adjacency.
+                if (CantReachTargetRecovery.retryExhausted(
+                        Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
+                    Microbot.pauseAllScripts.compareAndSet(false, true);
+                    Microbot.showMessage("Your bot tried to interact with an NPC for "
+                            + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
                     return false;
-                } else {
-					Microbot.pauseAllScripts.compareAndSet(true, false);
+                }
+                final WorldPoint npcWorldPoint = npc.getWorldLocation();
+                if (npcWorldPoint == null) {
+                    log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npc.getName(), action);
+                    return false;
+                }
+                Microbot.cantReachTargetRetries++;
+                log.info("[Interact] can't-reach recovery: walking to NPC '{}' at {} (attempt {})",
+                        npc.getName(), npcWorldPoint, Microbot.cantReachTargetRetries);
+                if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
+                    Microbot.pauseAllScripts.compareAndSet(true, false);
                     Microbot.cantReachTarget = false;
                     Microbot.cantReachTargetRetries = 0;
+                    // fall through and click from beside it
+                } else {
+                    return false;
                 }
             }
 
@@ -1116,7 +1123,7 @@ public class Rs2Npc {
      */
     @Deprecated(since = "1.7.2", forRemoval = true)
     public static List<Rs2NpcModel> getNpcsAttackingPlayer(Player player) {
-        return getNpcs(x -> x.getInteracting() != null && Objects.equals(x.getInteracting(), player) && x.isDead())
+        return getNpcs(x -> x.getInteracting() != null && Objects.equals(x.getInteracting(), player) && !x.isDead())
                 .collect(Collectors.toList());
     }
 
@@ -1219,13 +1226,16 @@ public class Rs2Npc {
      * @return The nearest {@link Rs2NpcModel} that has the specified action, or {@code null} if none are found.
      */
     public static Rs2NpcModel getNearestNpcWithAction(String action) {
-        Rs2WorldPoint playerLocation = new Rs2WorldPoint(Microbot.getClient().getLocalPlayer().getWorldLocation());
+        Rs2WorldPoint playerLocation = new Rs2WorldPoint(Rs2Player.getWorldLocation());
         boolean isInstance = Microbot.getClient().getTopLevelWorldView().getScene().isInstance();
         return getNpcs()
                 .filter(value -> value.getComposition() != null
                         && value.getComposition().getActions() != null
                         && Arrays.asList(value.getComposition().getActions()).contains(action))
-                .min(Comparator.comparingInt(value -> playerLocation.distanceToPath(isInstance ? Rs2WorldPoint.toLocalInstance(value.getWorldLocation()) : value.getWorldLocation())))
+                .min(Comparator.comparingInt(value -> {
+                    WorldPoint wp = isInstance ? Rs2WorldPoint.toLocalInstance(value.getWorldLocation()) : value.getWorldLocation();
+                    return wp == null ? Integer.MAX_VALUE : Rs2WorldPoint.quickDistance(playerLocation.getWorldPoint(), wp);
+                }))
                 .orElse(null);
     }
 
