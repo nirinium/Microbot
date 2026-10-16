@@ -230,8 +230,29 @@ public class Microbot {
     @Getter
     private static GameTickBroadcaster gameTickBroadcaster;
 
-    @Getter
     private static final Set<Integer> worldViewIds = ConcurrentHashMap.newKeySet();
+
+    /**
+     * World view IDs tracked for the Rs2*Cache family (NPC/player/tile-object/tile-item).
+     * <p>
+     * Populated reactively via {@code WorldViewLoaded}/{@code WorldViewUnloaded} events in
+     * {@link MicrobotPlugin}. If that event-driven tracking ever misses a transition (e.g. a
+     * boss-instance world view swap that doesn't round-trip through the subscriber in time),
+     * the caches would silently see zero NPCs/objects/items in that view. To guard against that,
+     * always ensure the client's current top-level world view ID is present — this mirrors how
+     * the legacy {@code Rs2Npc}/{@code Rs2GameObject} APIs read {@code getTopLevelWorldView()}
+     * directly rather than depending on this tracked set.
+     *
+     * @return the tracked world view IDs, guaranteed to include the current top-level view
+     */
+    public static Set<Integer> getWorldViewIds() {
+        Client c = getClient();
+        WorldView topLevel = c != null ? c.getTopLevelWorldView() : null;
+        if (topLevel != null) {
+            worldViewIds.add(topLevel.getId());
+        }
+        return worldViewIds;
+    }
     /**
      * Get the total runtime of the script
      *

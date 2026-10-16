@@ -5,25 +5,29 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
 import net.runelite.api.coords.LocalPoint;
+import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.AnimationID;
 import net.runelite.api.gameval.NpcID;
 import net.runelite.api.gameval.ObjectID1;
 import net.runelite.api.gameval.SpotanimID;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.Script;
+import net.runelite.client.plugins.microbot.statemachine.StateMachineScript;
+import net.runelite.client.plugins.microbot.statemachine.Transition;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.function.Supplier;
+import net.runelite.client.plugins.microbot.api.npc.models.Rs2NpcModel;
+import net.runelite.client.plugins.microbot.api.tileitem.models.Rs2TileItemModel;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
-import net.runelite.client.plugins.microbot.util.grounditem.LootingParameters;
-import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.magic.thralls.Rs2Thrall;
 import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
 import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.misc.Rs2Potion;
 import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
-import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
@@ -33,7 +37,9 @@ import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import static net.runelite.client.plugins.microbot.Microbot.log;
@@ -53,7 +59,7 @@ import static net.runelite.client.plugins.microbot.Microbot.log;
  * - Enrage at ≤255 HP: faster attacks, cleave replaces melee, dodge on "Skree!"
  */
 @Slf4j
-public class AraxxorScript extends Script {
+public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPhase> {
 
     // ── Constants ───────────────────────────────────────
     // NPC IDs
@@ -93,6 +99,11 @@ public class AraxxorScript extends Script {
     private static final int VENOM_PUDDLE_2 = ObjectID1.ARAXXOR_VENOM_PUDDLE02;   // 54256
     private static final int VENOM_PUDDLE_3 = ObjectID1.ARAXXOR_VENOM_PUDDLE03;   // 54257
 
+    private static final String[] BALLISTA_JAVELINS = {
+            "Dragon javelin", "Amethyst javelin", "Rune javelin", "Adamant javelin",
+            "Mithril javelin", "Steel javelin", "Iron javelin", "Bronze javelin"
+    };
+
     // ── State ───────────────────────────────────────────
     @Getter
     @Setter
@@ -104,25 +115,26 @@ public class AraxxorScript extends Script {
     @Getter
     private volatile boolean enraged = false;
 
-    // Acid pools tracked via plugin events
+    // Acid pools tracked via plugin events — mutated from the client thread (event handlers)
+    // and read from the script thread, so must be a concurrency-safe set.
     @Getter
-    private final Set<WorldPoint> acidPools = new HashSet<>();
+    private final Set<WorldPoint> acidPools = ConcurrentHashMap.newKeySet();
 
     // Attack counter for egg hatching awareness
     @Getter
     @Setter
     private volatile int araxxorAttackCount = 0;
+    private volatile int lastRangedRepositionAttack = -1;
 
     // Spec tracking
     private volatile int specHitsCompleted = 0;
-
     // Acid drip tracking
     @Getter
     @Setter
     private volatile boolean acidDripActive = false;
     @Setter
     private volatile long acidDripStartTick = 0;
-    // Alternating phase for acid drip movement: 0 = step under boss, 1 = step off + attack
+    // Acid drip sequence: 0 = step under boss, 1 = step off, 2 = attack after movement lands
     private volatile int acidDripPhase = 0;
 
     // Enrage cleave tracking
@@ -153,11 +165,139 @@ public class AraxxorScript extends Script {
 
     private AraxxorConfig config;
 
+    enum EncounterPhase { WAITING, ACTIVE, POST_FIGHT, ERROR }
+    private volatile boolean postFight;
+    private volatile boolean deathProcessed;
+    private boolean bossAvailable;
+    private WorldPoint movementDestination;
+    private WorldPoint movementOrigin;
+    private long movementDeadline;
+    private boolean escapingAcid;
+    private long corpseRetryAt;
+    private long entryRetryAt;
+    private long lootQuietSince;
+    private int pendingLootId = -1;
+    private WorldPoint pendingLootTile;
+    private int pendingLootQuantity;
+    private long lootRetryAt;
+
+    @Override
+    protected EncounterPhase initialState() { return EncounterPhase.WAITING; }
+
+    @Override
+    protected List<Transition<EncounterPhase>> defineTransitions() {
+        List<Transition<EncounterPhase>> transitions = new ArrayList<>();
+        for (EncounterPhase from : EncounterPhase.values()) {
+            if (from != EncounterPhase.ERROR) {
+                transitions.add(Transition.from(from).when(() -> state == AraxxorState.ERROR, "execution failed")
+                        .because("Stop after execution failure").goTo(EncounterPhase.ERROR));
+            }
+            if (from != EncounterPhase.POST_FIGHT) {
+                transitions.add(Transition.from(from).when(() -> postFight, "postFight")
+                        .because("Death or corpse observed").goTo(EncounterPhase.POST_FIGHT));
+            }
+            if (from != EncounterPhase.ACTIVE) {
+                transitions.add(Transition.from(from).when(() -> !postFight && bossAvailable, "live boss observed")
+                        .because("Encounter available").goTo(EncounterPhase.ACTIVE));
+            }
+            if (from != EncounterPhase.WAITING) {
+                transitions.add(Transition.from(from).when(() -> !postFight && !bossAvailable, "no encounter pending")
+                        .because("Ready for next encounter").goTo(EncounterPhase.WAITING));
+            }
+        }
+        return transitions;
+    }
+
+    @Override
+    protected void onState(EncounterPhase phase) {
+        if (phase != EncounterPhase.ERROR) loop();
+    }
+
+    @Override
+    protected EncounterPhase onError(EncounterPhase phase, Exception error) {
+        throw new IllegalStateException("Araxxor encounter action failed", error);
+    }
+
+    private <T> T readClient(Supplier<T> read) {
+        return Microbot.getClientThread().runOnClientThreadOptional(read::get)
+                .orElseThrow(() -> new IllegalStateException("Client snapshot unavailable"));
+    }
+
+    @Getter
+    private static final class PlayerSnapshot {
+        private final WorldPoint worldLocation;
+        private PlayerSnapshot(WorldPoint worldLocation) { this.worldLocation = worldLocation; }
+    }
+
+    private PlayerSnapshot readPlayer() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Player player = Microbot.getClient().getLocalPlayer();
+            return player == null ? null : new PlayerSnapshot(player.getWorldLocation());
+        }).orElse(null);
+    }
+
+    private boolean isTarget(Rs2NpcModel target) {
+        return target != null && readClient(() -> {
+            Player player = Microbot.getClient().getLocalPlayer();
+            return player != null && player.getInteracting() == target.getNpc();
+        });
+    }
+
+    private boolean movementPending() {
+        if (movementDestination == null) return false;
+        PlayerSnapshot player = readPlayer();
+        WorldPoint playerLocation = player == null ? null : player.getWorldLocation();
+        boolean reachedDestination = playerLocation != null && movementDestination.equals(playerLocation);
+        boolean movedAdjacent = playerLocation != null
+                && movementOrigin != null
+                && !movementOrigin.equals(playerLocation)
+                && movementDestination.distanceTo(playerLocation) <= 1;
+        if (reachedDestination || movedAdjacent) {
+            movementDestination = null;
+            movementOrigin = null;
+            movementDeadline = 0;
+            escapingAcid = false;
+            return false;
+        }
+        if (System.currentTimeMillis() >= movementDeadline) {
+            // A blocked/occupied destination is recoverable. Clear it so the next
+            // loop recomputes the mechanic and chooses a fresh safe tile. Return
+            // true for this iteration so a timed-out dodge never permits an attack.
+            movementDestination = null;
+            movementOrigin = null;
+            movementDeadline = 0;
+            escapingAcid = false;
+            status = "Movement not observed — choosing another tile";
+            return true;
+        }
+        return true;
+    }
+
+    private void moveTo(WorldPoint destination) {
+        if (movementPending()) return;
+        LocalPoint local = readClient(() -> LocalPoint.fromWorld(Microbot.getClient(), destination));
+        PlayerSnapshot player = readPlayer();
+        movementOrigin = player == null ? null : player.getWorldLocation();
+        movementDestination = destination;
+        movementDeadline = System.currentTimeMillis() + 4800;
+        escapingAcid = false;
+        Rs2Walker.walkFastLocal(local);
+    }
+
     // ── Public API ──────────────────────────────────────
 
-    public boolean run(AraxxorConfig config) {
+    public synchronized boolean run(AraxxorConfig config) {
+        if (isRunning()) {
+            return true;
+        }
+
         this.config = config;
+        resetFightState();
+        deathProcessed = false;
+        postFight = false;
+        pendingLootId = -1;
         state = AraxxorState.IDLE;
+        status = "Waiting for Araxxor";
         killCount = 0;
         enraged = false;
         specHitsCompleted = 0;
@@ -167,10 +307,21 @@ public class AraxxorScript extends Script {
 
         mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
             try {
-                if (!Microbot.isLoggedIn() || !super.run()) return;
-                loop();
-            } catch (Exception ex) {
-                Microbot.logStackTrace("AraxxorScript", ex);
+                if (!Microbot.isLoggedIn()) {
+                    status = "Waiting for login";
+                    return;
+                }
+                Rs2NpcModel observedBoss = getNpc(ARAXXOR_ID);
+                bossAvailable = observedBoss != null && !isDead(observedBoss);
+                if (!step()) {
+                    status = "Paused by Microbot";
+                    return;
+                }
+            } catch (Exception | AssertionError ex) {
+                log.error("Araxxor execution stopped", ex);
+                super.shutdown();
+                state = AraxxorState.ERROR;
+                status = "Stopped after " + ex.getClass().getSimpleName();
             }
         }, 0, 100, TimeUnit.MILLISECONDS);  // 100ms tick for responsive dodging
 
@@ -201,7 +352,7 @@ public class AraxxorScript extends Script {
         // Detect acid special attacks
         if (animationId == ANIM_ACID_LEAK) {
             acidDripActive = true;
-            acidDripStartTick = Microbot.getClient().getTickCount();
+            acidDripStartTick = readClient(() -> Microbot.getClient().getTickCount());
             acidDripPhase = 0; // start with step-under
             log("Acid drip detected — step under boss!");
         }
@@ -214,11 +365,11 @@ public class AraxxorScript extends Script {
             log("Acid cannon launched — dodge NOW!");
             acidCannonIncoming = true;
             // Track where Araxxor was standing when it fired
-            Rs2NpcModel boss = Rs2Npc.getNpc(ARAXXOR_ID);
+            Rs2NpcModel boss = getNpc(ARAXXOR_ID);
             if (boss != null) {
                 acidCannonSourceTile = boss.getWorldLocation();
             }
-            // Pre-compute and initiate dodge on the same game tick
+            // Pre-compute the destination; movement is issued by the script thread.
             precomputeAndDodgeAcidCannon();
         }
 
@@ -237,11 +388,11 @@ public class AraxxorScript extends Script {
         if (!acidCannonIncoming) {
             log("Acid cannon detected via projectile NPC spawn!");
             acidCannonIncoming = true;
-            Rs2NpcModel boss = Rs2Npc.getNpc(ARAXXOR_ID);
+            Rs2NpcModel boss = getNpc(ARAXXOR_ID);
             if (boss != null) {
                 acidCannonSourceTile = boss.getWorldLocation();
             }
-            // Pre-compute and dodge immediately if animation path didn't already
+            // Pre-compute the destination if animation detection missed it.
             if (precomputedAcidDodge == null) {
                 precomputeAndDodgeAcidCannon();
             }
@@ -252,11 +403,14 @@ public class AraxxorScript extends Script {
      * Called from plugin on NPC death for kill tracking.
      * Guarded against double-calls (death animation + despawn can both trigger this).
      */
-    public void onAraxxorDeath() {
+    public synchronized void onAraxxorDeath() {
         // Guard: only count the kill once per fight (state transitions to LOOTING on first call)
-        if (state == AraxxorState.LOOTING) {
+        if (deathProcessed) {
             return; // Already processed this death
         }
+        deathProcessed = true;
+        postFight = true;
+        lootQuietSince = System.currentTimeMillis();
         killCount++;
         resetFightState();
         state = AraxxorState.LOOTING;
@@ -294,8 +448,8 @@ public class AraxxorScript extends Script {
     // ── Main Loop ───────────────────────────────────────
 
     private void loop() {
-        Client client = Microbot.getClient();
-        Player player = client.getLocalPlayer();
+
+        PlayerSnapshot player = readPlayer();
         if (player == null) return;
 
         // ── 0. Safety: eat & emergency teleport checks ──
@@ -318,8 +472,8 @@ public class AraxxorScript extends Script {
         // The explosion hits for up to 80 damage at melee range. At 3+ tiles it's only ~7.
         // We flee at distance ≤ 2 (one tile BEFORE it can reach us) to guarantee we're
         // gone before it arrives on our tile and triggers the explosion.
-        Rs2NpcModel rupturaUrgent = Rs2Npc.getNpc(RUPTURA_ID);
-        if (rupturaUrgent != null && !rupturaUrgent.isDead()) {
+        Rs2NpcModel rupturaUrgent = getNpc(RUPTURA_ID);
+        if (rupturaUrgent != null && !isDead(rupturaUrgent)) {
             WorldPoint ruptLoc = rupturaUrgent.getWorldLocation();
             int ruptDist = player.getWorldLocation().distanceTo(ruptLoc);
             if (ruptDist <= 3) {
@@ -344,11 +498,11 @@ public class AraxxorScript extends Script {
         // Active poll: check if the acid cannon projectile NPC (13676) is alive in case
         // event-based detection (animation / NPC spawn) was missed entirely.
         if (!acidCannonIncoming) {
-            Rs2NpcModel cannonNpc = Rs2Npc.getNpc(ACID_CANNON_PROJ_NPC);
-            if (cannonNpc != null && !cannonNpc.isDead()) {
+            Rs2NpcModel cannonNpc = getNpc(ACID_CANNON_PROJ_NPC);
+            if (cannonNpc != null && !isDead(cannonNpc)) {
                 log("Acid cannon detected via active polling!");
                 acidCannonIncoming = true;
-                Rs2NpcModel boss = Rs2Npc.getNpc(ARAXXOR_ID);
+                Rs2NpcModel boss = getNpc(ARAXXOR_ID);
                 if (boss != null) {
                     acidCannonSourceTile = boss.getWorldLocation();
                 }
@@ -357,21 +511,27 @@ public class AraxxorScript extends Script {
         if (acidCannonIncoming) {
             status = "Dodging acid cannon!";
             state = AraxxorState.DODGING_ACID_BALL;
-            if (precomputedAcidDodge != null) {
-                // Walk already initiated by event handler — just confirm and clear
-                log("Acid cannon dodge already in progress → " + precomputedAcidDodge);
-                precomputedAcidDodge = null;
-            } else {
-                // Fallback: event handler missed, compute and dodge now
-                dodgeAcidCannon(player);
-            }
+            dodgeAcidCannon(player);
             acidCannonIncoming = false;
             return;
         }
 
+        // Acid can spawn underneath us while an older walk is still pending. It
+        // must supersede that route instead of waiting for its timeout.
+        if (isOnAcidPool(player.getWorldLocation()) && !escapingAcid) {
+            movementDestination = null;
+            movementOrigin = null;
+            movementDeadline = 0;
+            status = "Moving off acid!";
+            moveOffAcid(player);
+            return;
+        }
+
+        if (movementPending()) return;
+
         // ── 4. Priority: handle acid drip (keep moving) ──
         if (acidDripActive) {
-            long ticksSinceDrip = client.getTickCount() - acidDripStartTick;
+            long ticksSinceDrip = readClient(() -> Microbot.getClient().getTickCount()) - acidDripStartTick;
             if (ticksSinceDrip > 6) {
                 acidDripActive = false;
             } else {
@@ -381,26 +541,25 @@ public class AraxxorScript extends Script {
             }
         }
 
-        // ── 5. Avoid standing on acid pools ──
-        if (isOnAcidPool(player.getWorldLocation())) {
-            status = "Moving off acid!";
-            moveOffAcid(player);
-            return;
-        }
-
         // Wall proximity is handled passively by pickBestTile()'s scoreTile() —
         // all movement destinations are penalised for being near walls.
         // We only force a return-to-center after explosive events (ruptura flee,
         // acid cannon dodge) that may have pushed us far out, not every loop tick.
 
         // ── 5. Find Araxxor ──
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel araxxor = getNpc(ARAXXOR_ID);
 
         // No boss found — could be dead/looting/idle
-        if (araxxor == null) {
+        if (araxxor == null || isDead(araxxor)) {
             handleNoBoss();
             return;
         }
+
+        if (!isDead(araxxor)) deathProcessed = false;
+
+        // Protection must be active as soon as a live Araxxor is observed. Do this
+        // before gear, potion, minion, or attack actions can consume the next tick.
+        managePrayers(player, araxxor);
 
         // Set arena center on first sighting of Araxxor (its spawn ≈ arena center)
         if (arenaCenter == null) {
@@ -413,11 +572,22 @@ public class AraxxorScript extends Script {
             return; // Minion handling took priority
         }
 
+        // After the first successful spec, keep the spec weapon equipped and fire
+        // the next configured spec immediately on the next safe loop iteration.
+        if (config.useSpecialAttack()
+                && specHitsCompleted > 0
+                && specHitsCompleted < config.specCount()
+                && Rs2Equipment.isWearing(config.specWeapon())) {
+            if (performSpecialAttack(player, araxxor)) return;
+        }
+
+        switchToMainWeapon();
+
         // ── 7. Potions ──
         drinkPotions();
 
         // ── 8. Prayer management ──
-        managePrayers();
+        managePrayers(player, araxxor);
 
         // ── 8.5. Thrall summoning ──
         if (config.useThralls()) {
@@ -426,7 +596,7 @@ public class AraxxorScript extends Script {
 
         // ── 9. Special attack for Defence drain ──
         if (config.useSpecialAttack() && specHitsCompleted < config.specCount()) {
-            if (performSpecialAttack(araxxor)) {
+            if (performSpecialAttack(player, araxxor)) {
                 return;
             }
         }
@@ -442,7 +612,6 @@ public class AraxxorScript extends Script {
         status = "Fighting Araxxor";
         state = AraxxorState.FIGHTING;
 
-        WorldPoint araxxorLoc = araxxor.getWorldLocation();
         WorldPoint playerLoc = player.getWorldLocation();
 
         // Only reposition if we're standing on acid — otherwise stay put and fight.
@@ -452,9 +621,16 @@ public class AraxxorScript extends Script {
             return;
         }
 
+        if (config.combatStyle() == AraxxorConfig.CombatStyle.RANGED
+                && shouldForceRangedAttack()
+                && maintainRangedDistance(player, araxxor, 2)) {
+            status = "Creating space for ranged attack";
+            return;
+        }
+
         // Engage Araxxor if not already in combat
-        if (!Rs2Combat.inCombat() || !player.isInteracting()) {
-            Rs2Npc.interact(araxxor, "attack");
+        if (!isTarget(araxxor)) {
+            attackNpc(araxxor);
             tickSleep();
         }
 
@@ -471,7 +647,7 @@ public class AraxxorScript extends Script {
      *
      * @return true if a cleave was dodged (caller should re-evaluate state)
      */
-    private boolean checkAndDodgeCleave(Player player) {
+    private boolean checkAndDodgeCleave(PlayerSnapshot player) {
         if (enraged && cleaveIncoming) {
             status = "Dodging cleave (during adds)!";
             dodgeCleave(player);
@@ -491,28 +667,28 @@ public class AraxxorScript extends Script {
      *
      * @return true if a minion action was taken and we should skip the rest of the loop
      */
-    private boolean handleMinions(Player player, Rs2NpcModel araxxor) {
+    private boolean handleMinions(PlayerSnapshot player, Rs2NpcModel araxxor) {
         // Cleave & acid cannon checks before starting any minion work
         if (checkAndDodgeCleave(player)) return true;
         if (checkAndDodgeAcidCannon(player)) return true;
 
         // ── Ruptura (red) — most dangerous, explodes for up to 80 damage ──
-        Rs2NpcModel ruptura = Rs2Npc.getNpc(RUPTURA_ID);
-        if (ruptura != null && !ruptura.isDead()) {
+        Rs2NpcModel ruptura = getNpc(RUPTURA_ID);
+        if (ruptura != null && !isDead(ruptura)) {
             return handleRuptura(player, araxxor, ruptura);
         }
 
         // ── Mirrorback (white) — reflects damage ──
-        Rs2NpcModel mirrorback = Rs2Npc.getNpc(MIRRORBACK_ID);
-        if (mirrorback != null && !mirrorback.isDead()) {
-            return handleMirrorback(player, mirrorback);
+        Rs2NpcModel mirrorback = getNpc(MIRRORBACK_ID);
+        if (mirrorback != null && !isDead(mirrorback)) {
+            return handleMirrorback(player, araxxor, mirrorback);
         }
 
         // ── Acidic (green) — ranged attacks, explodes on death ──
         if (config.killAcidicAraxytes()) {
-            Rs2NpcModel acidic = Rs2Npc.getNpc(ACIDIC_ID);
-            if (acidic != null && !acidic.isDead()) {
-                return handleAcidic(player, acidic);
+            Rs2NpcModel acidic = getNpc(ACIDIC_ID);
+            if (acidic != null && !isDead(acidic)) {
+                return handleAcidic(player, araxxor, acidic);
             }
         }
 
@@ -533,8 +709,9 @@ public class AraxxorScript extends Script {
      * Lure mode: position so the ruptura paths through/under Araxxor, dealing
      * 64-80 damage to the boss when it explodes.
      */
-    private boolean handleRuptura(Player player, Rs2NpcModel araxxor, Rs2NpcModel ruptura) {
+    private boolean handleRuptura(PlayerSnapshot player, Rs2NpcModel araxxor, Rs2NpcModel ruptura) {
         state = AraxxorState.KILLING_RUPTURA;
+        managePrayers(player, araxxor);
         WorldPoint rupturaLoc = ruptura.getWorldLocation();
         WorldPoint playerLoc = player.getWorldLocation();
         int distToRuptura = playerLoc.distanceTo(rupturaLoc);
@@ -544,38 +721,15 @@ public class AraxxorScript extends Script {
             status = "FLEE RUPTURA! Close! (" + distToRuptura + " tiles)";
             fleeFromRuptura(player, rupturaLoc);
 
-            // Stay 4+ tiles away and wait for the ruptura to die/despawn before re-engaging.
-            // Poll every 100ms (faster than before) to catch closing distance sooner.
-            sleepUntil(() -> {
-                Player p = Microbot.getClient().getLocalPlayer();
-                if (p == null) return true;
+            return true;
+        }
 
-                // Keep dodging cleave/cannon while waiting
-                checkAndDodgeCleave(p);
-                checkAndDodgeAcidCannon(p);
-
-                Rs2NpcModel rupt = Rs2Npc.getNpc(RUPTURA_ID);
-                if (rupt == null || rupt.isDead()) {
-                    return true; // It's dead, safe to proceed
-                }
-
-                // If it's getting close again, flee at ≤3 tiles (before it can reach us)
-                WorldPoint rLoc = rupt.getWorldLocation();
-                if (p.getWorldLocation().distanceTo(rLoc) <= 3) {
-                    fleeFromRuptura(p, rLoc);
-                }
-
-                return false;
-            }, () -> {
-                // Idle callback: eat if needed while waiting
-                Rs2Player.eatAt(config.eatAtHpPercent());
-            }, 10000, 100);
-
-            // After ruptura dies, verify we're at a safe distance before returning
-            status = "Ruptura dead — checking position";
-            if (isTooCloseToWall(player.getWorldLocation())) {
-                returnToCenter(player);
-            }
+        if (config.prioritizeAraxytes()) {
+            status = "Prioritizing ruptura araxyte (" + distToRuptura + " tiles)";
+            if (!switchToAraxyteWeapon()) return true;
+            managePrayers(player, araxxor);
+            attackNpc(ruptura, true);
+            tickSleep();
             return true;
         }
 
@@ -601,19 +755,19 @@ public class AraxxorScript extends Script {
 
             if (playerLoc.distanceTo(lureTile) > 1) {
                 status = "Luring ruptura — positioning (" + distToRuptura + " tiles)";
-                Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), lureTile));
+                moveTo(lureTile);
                 tickSleep();
             } else {
                 status = "Ruptura approaching (" + distToRuptura + " tiles)";
-                if (!player.isInteracting()) {
-                    Rs2Npc.interact(araxxor, "attack");
+                if (!isTarget(araxxor)) {
+                    attackNpc(araxxor);
                 }
             }
         } else {
             // Non-lure: just keep fighting, we'll dodge when it's adjacent
             status = "Ruptura approaching (" + distToRuptura + " tiles)";
-            if (!player.isInteracting()) {
-                Rs2Npc.interact(araxxor, "attack");
+            if (!isTarget(araxxor)) {
+                attackNpc(araxxor);
             }
         }
 
@@ -627,7 +781,7 @@ public class AraxxorScript extends Script {
      * the ruptura moves 1 tile/tick, so even with polling variance we stay safe.
      * Avoids acid pools on both the destination and the path.
      */
-    private void fleeFromRuptura(Player player, WorldPoint rupturaLoc) {
+    private void fleeFromRuptura(PlayerSnapshot player, WorldPoint rupturaLoc) {
         WorldPoint playerLoc = player.getWorldLocation();
         int dx = playerLoc.getX() - rupturaLoc.getX();
         int dy = playerLoc.getY() - rupturaLoc.getY();
@@ -656,20 +810,16 @@ public class AraxxorScript extends Script {
         };
 
         WorldPoint best = pickBestTile(candidates);
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
+        moveTo(best);
         tickSleep();
     }
 
     /**
      * Handle mirrorback araxyte — redirects 20% of Araxxor damage to itself,
-     * recoils 50% of that to player. Must kill with ranged/magic/halberd (no melee recoil).
-     * Noxious halberd 1-hits them.
-     * <p>
-     * Critical: the halberd has 2-tile reach, so we must be EXACTLY 1 cardinal tile
-     * away (not diagonal, not on top). We verify true tile distance before attacking
-     * and re-verify inside the wait loop after any dodge repositions us.
+     * recoils 50% of that to player. A noxious halberd, crush weapon, or heavy
+     * ranged weapon can guarantee a max hit when its corresponding style is highest.
      */
-    private boolean handleMirrorback(Player player, Rs2NpcModel mirrorback) {
+    private boolean handleMirrorback(PlayerSnapshot player, Rs2NpcModel araxxor, Rs2NpcModel mirrorback) {
         state = AraxxorState.KILLING_MIRRORBACK;
         status = "Killing mirrorback araxyte!";
 
@@ -677,55 +827,10 @@ public class AraxxorScript extends Script {
         if (checkAndDodgeCleave(player)) return true;
         if (checkAndDodgeAcidCannon(player)) return true;
 
-        // We need to be exactly 1 cardinal tile away (not diagonal, not on top).
-        // Use real tile difference, not Chebyshev distanceTo().
-        WorldPoint mbLoc = mirrorback.getWorldLocation();
-        WorldPoint playerLoc = player.getWorldLocation();
-        int relX = Math.abs(playerLoc.getX() - mbLoc.getX());
-        int relY = Math.abs(playerLoc.getY() - mbLoc.getY());
-        boolean exactlyOneCardinal = (relX + relY == 1); // one axis is 1, other is 0
-
-        if (!exactlyOneCardinal) {
-            // Walk to a cardinal-adjacent tile (1 tile N/S/E/W, never diagonal)
-            WorldPoint[] adjacentTiles = {
-                    new WorldPoint(mbLoc.getX(), mbLoc.getY() - 1, mbLoc.getPlane()),  // south
-                    new WorldPoint(mbLoc.getX() + 1, mbLoc.getY(), mbLoc.getPlane()),  // east
-                    new WorldPoint(mbLoc.getX() - 1, mbLoc.getY(), mbLoc.getPlane()),  // west
-                    new WorldPoint(mbLoc.getX(), mbLoc.getY() + 1, mbLoc.getPlane()),  // north
-            };
-            WorldPoint best = pickBestTile(adjacentTiles);
-            Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
-            if (tickSleep()) return true; // interrupted by dodge
-            // Wait until we actually arrive at 1 cardinal tile distance
-            sleepUntil(() -> {
-                Player p = Microbot.getClient().getLocalPlayer();
-                Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
-                if (p == null || mb == null || mb.isDead()) return true;
-                int rx = Math.abs(p.getWorldLocation().getX() - mb.getWorldLocation().getX());
-                int ry = Math.abs(p.getWorldLocation().getY() - mb.getWorldLocation().getY());
-                return (rx + ry == 1);
-            }, 1800);
-            return true; // let loop re-verify position
+        if (!switchToAraxyteWeapon()) {
+            return true;
         }
-
-        // Switch to araxyte weapon (noxious halberd recommended)
-        String araxWeapon = config.araxyteSwitchWeapon();
-        if (!araxWeapon.isEmpty()) {
-            if (!Rs2Equipment.isWearing(araxWeapon)) {
-                if (!Rs2Inventory.wield(araxWeapon)) {
-                    log("WARNING: " + araxWeapon + " not in inventory — cannot equip for mirrorback");
-                    return true;
-                }
-                if (tickSleep()) { switchToMainWeapon(); return true; }
-                // Verify the weapon actually equipped
-                sleepUntil(() -> Rs2Equipment.isWearing(config.araxyteSwitchWeapon()), 1200);
-                if (!Rs2Equipment.isWearing(araxWeapon)) {
-                    log("WARNING: Failed to equip " + araxWeapon + " for mirrorback!");
-                    switchToMainWeapon();
-                    return true; // retry next loop
-                }
-            }
-        }
+        managePrayers(player, araxxor);
 
         // Dodge cleave before attacking
         if (checkAndDodgeCleave(player)) {
@@ -737,53 +842,9 @@ public class AraxxorScript extends Script {
             return true;
         }
 
-        Rs2Npc.interact(mirrorback, "attack");
+        attackNpc(mirrorback);
         tickSleep();
 
-        // Wait until the mirrorback is actually dead before switching back.
-        // Check for cleave dodges while we wait so we don't eat a "Skree!".
-        // Also re-verify 1-tile cardinal distance and reposition if a dodge moved us.
-        sleepUntil(() -> {
-            Player p = Microbot.getClient().getLocalPlayer();
-            if (p != null) {
-                checkAndDodgeCleave(p);
-                checkAndDodgeAcidCannon(p);
-            }
-            Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
-            return mb == null || mb.isDead();
-        }, () -> {
-            // Keep re-attacking if we stopped interacting (e.g. after a dodge)
-            Rs2NpcModel mb = Rs2Npc.getNpc(MIRRORBACK_ID);
-            if (mb != null && !mb.isDead()) {
-                Player p = Microbot.getClient().getLocalPlayer();
-                if (p != null) {
-                    // Re-verify cardinal 1-tile distance; reposition if needed
-                    WorldPoint pLoc = p.getWorldLocation();
-                    WorldPoint mLoc = mb.getWorldLocation();
-                    int rx = Math.abs(pLoc.getX() - mLoc.getX());
-                    int ry = Math.abs(pLoc.getY() - mLoc.getY());
-                    if (rx + ry != 1) {
-                        // Not at correct distance — walk to nearest cardinal tile
-                        WorldPoint[] adj = {
-                                new WorldPoint(mLoc.getX(), mLoc.getY() - 1, mLoc.getPlane()),
-                                new WorldPoint(mLoc.getX() + 1, mLoc.getY(), mLoc.getPlane()),
-                                new WorldPoint(mLoc.getX() - 1, mLoc.getY(), mLoc.getPlane()),
-                                new WorldPoint(mLoc.getX(), mLoc.getY() + 1, mLoc.getPlane()),
-                        };
-                        WorldPoint best = pickBestTile(adj);
-                        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
-                    } else if (!p.isInteracting()) {
-                        Rs2Npc.interact(mb, "attack");
-                    }
-                }
-            }
-        }, 6000, 600);
-
-        // Dodge cleave one more time before switching
-        checkAndDodgeCleave(player);
-
-        // Now safe to switch back to main weapon
-        switchToMainWeapon();
         return true;
     }
 
@@ -794,7 +855,7 @@ public class AraxxorScript extends Script {
      * Also checks for enrage cleave between actions so we never eat a "Skree!" while
      * weapon-switching or waiting for the attack/explosion.
      */
-    private boolean handleAcidic(Player player, Rs2NpcModel acidic) {
+    private boolean handleAcidic(PlayerSnapshot player, Rs2NpcModel araxxor, Rs2NpcModel acidic) {
         state = AraxxorState.KILLING_ACIDIC;
         status = "Killing acidic araxyte!";
 
@@ -802,23 +863,10 @@ public class AraxxorScript extends Script {
         if (checkAndDodgeCleave(player)) return true;
         if (checkAndDodgeAcidCannon(player)) return true;
 
-        String araxWeapon = config.araxyteSwitchWeapon();
-        if (!araxWeapon.isEmpty()) {
-            if (!Rs2Equipment.isWearing(araxWeapon)) {
-                if (!Rs2Inventory.wield(araxWeapon)) {
-                    log("WARNING: " + araxWeapon + " not in inventory — cannot equip for acidic");
-                    return true;
-                }
-                if (tickSleep()) { switchToMainWeapon(); return true; }
-                // Verify the weapon actually equipped
-                sleepUntil(() -> Rs2Equipment.isWearing(config.araxyteSwitchWeapon()), 1200);
-                if (!Rs2Equipment.isWearing(araxWeapon)) {
-                    log("WARNING: Failed to equip " + araxWeapon + " for acidic!");
-                    switchToMainWeapon();
-                    return true; // retry next loop
-                }
-            }
+        if (!switchToAraxyteWeapon()) {
+            return true;
         }
+        managePrayers(player, araxxor);
 
         // Dodge cleave / acid cannon before attacking
         if (checkAndDodgeCleave(player)) {
@@ -830,40 +878,124 @@ public class AraxxorScript extends Script {
             return true;
         }
 
-        Rs2Npc.interact(acidic, "attack");
+        attackNpc(acidic);
         tickSleep();
 
-        // Wait until the acidic is dead before switching weapon or moving away.
-        // Dodge cleave/cannon while waiting.
-        sleepUntil(() -> {
-            Player p = Microbot.getClient().getLocalPlayer();
-            if (p != null) {
-                checkAndDodgeCleave(p);
-                checkAndDodgeAcidCannon(p);
-            }
-            Rs2NpcModel ac = Rs2Npc.getNpc(ACIDIC_ID);
-            return ac == null || ac.isDead();
-        }, () -> {
-            // Keep re-attacking if we stopped interacting (e.g. after a dodge)
-            Rs2NpcModel ac = Rs2Npc.getNpc(ACIDIC_ID);
-            if (ac != null && !ac.isDead()) {
-                Player p = Microbot.getClient().getLocalPlayer();
-                if (p != null && !p.isInteracting()) {
-                    Rs2Npc.interact(ac, "attack");
-                }
-            }
-        }, 6000, 600);
+        return true;
+    }
 
-        // Acidic is dead — move away from the 7x7 acid AoE explosion
-        WorldPoint acidLoc = acidic.getWorldLocation();
-        WorldPoint playerLoc = player.getWorldLocation();
-        if (playerLoc.distanceTo(acidLoc) < 5) {
-            moveAwayFrom(playerLoc, acidLoc, 4);
-            tickSleep();
+    private boolean switchToAraxyteWeapon() {
+        String araxWeapon = config.araxyteSwitchWeapon().trim();
+        if (araxWeapon.isEmpty()) return true;
+
+        if (!Rs2Equipment.isWearing(araxWeapon)) {
+            status = "Equipping " + araxWeapon;
+            if (!Rs2Inventory.wield(araxWeapon)) {
+                log("WARNING: " + araxWeapon + " not in inventory — cannot equip for araxyte");
+                return false;
+            }
+            if (tickSleep()) {
+                switchToMainWeapon();
+                return false;
+            }
+            if (!sleepUntil(() -> Rs2Equipment.isWearing(araxWeapon), 1200)) {
+                log("WARNING: Failed to equip " + araxWeapon + " for araxyte!");
+                switchToMainWeapon();
+                return false;
+            }
         }
 
-        // Now safe to switch back to main weapon
-        switchToMainWeapon();
+        if (!isBallista(araxWeapon)) return true;
+
+        String javelin = Arrays.stream(BALLISTA_JAVELINS)
+                .filter(Rs2Inventory::hasItem)
+                .findFirst()
+                .orElse(null);
+        if (javelin == null) {
+            if (isJavelinEquipped()) return true;
+            status = "No javelins available for " + araxWeapon;
+            log("WARNING: No javelins in inventory or ammo slot for " + araxWeapon);
+            return false;
+        }
+
+        if (!Rs2Equipment.isWearing(javelin)) {
+            status = "Equipping " + javelin;
+            if (!Rs2Inventory.wield(javelin)) {
+                log("WARNING: Failed to click " + javelin + " for " + araxWeapon);
+                return false;
+            }
+            if (tickSleep()) {
+                switchToMainWeapon();
+                return false;
+            }
+            if (!sleepUntil(() -> Rs2Equipment.isWearing(javelin), 1200)) {
+                log("WARNING: Failed to equip " + javelin + " for " + araxWeapon);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isBallista(String weaponName) {
+        return weaponName.toLowerCase(Locale.ROOT).contains("ballista");
+    }
+
+    private boolean isJavelinEquipped() {
+        return Rs2Equipment.isWearing(item -> item.getName() != null
+                && item.getName().toLowerCase(Locale.ROOT).contains("javelin"));
+    }
+
+    private boolean shouldForceRangedAttack() {
+        int attackCount = araxxorAttackCount;
+        if (attackCount <= 0 || attackCount % 2 != 0 || attackCount == lastRangedRepositionAttack) {
+            return false;
+        }
+        lastRangedRepositionAttack = attackCount;
+        return true;
+    }
+
+    /**
+     * Move far enough from Araxxor to force a ranged or magic attack.
+     * Ranged setups should have higher magic defence so this resolves to ranged,
+     * while Aranea boots can negate that attack once every eight ticks.
+     *
+     * @return true when a movement command was issued
+     */
+    private boolean maintainRangedDistance(PlayerSnapshot player, Rs2NpcModel araxxor, int minimumDistance) {
+        WorldPoint playerLoc = player.getWorldLocation();
+        WorldArea bossArea = readClient(araxxor::getWorldArea);
+        int currentDistance = bossArea.distanceTo(playerLoc);
+        if (currentDistance >= minimumDistance) {
+            return false;
+        }
+
+        int bossCenterX = bossArea.getX() + bossArea.getWidth() / 2;
+        int bossCenterY = bossArea.getY() + bossArea.getHeight() / 2;
+        int awayX = Integer.signum(playerLoc.getX() - bossCenterX);
+        int awayY = Integer.signum(playerLoc.getY() - bossCenterY);
+        if (awayX == 0 && awayY == 0) {
+            awayY = -1;
+        }
+
+        int moveDistance = minimumDistance - currentDistance + 1;
+        WorldPoint[] candidates = {
+                new WorldPoint(
+                        playerLoc.getX() + awayX * moveDistance,
+                        playerLoc.getY() + awayY * moveDistance,
+                        playerLoc.getPlane()),
+                new WorldPoint(
+                        playerLoc.getX() + awayX * moveDistance + awayY,
+                        playerLoc.getY() + awayY * moveDistance - awayX,
+                        playerLoc.getPlane()),
+                new WorldPoint(
+                        playerLoc.getX() + awayX * moveDistance - awayY,
+                        playerLoc.getY() + awayY * moveDistance + awayX,
+                        playerLoc.getPlane()),
+        };
+
+        WorldPoint best = pickBestTile(candidates);
+        moveTo(best);
+        tickSleep();
         return true;
     }
 
@@ -882,7 +1014,12 @@ public class AraxxorScript extends Script {
      * by walking there (Araxxor follows the player in melee range). Once the
      * area is clean, we resume the step-under → dodge → attack cycle.
      */
-    private void handleEnrageFight(Player player, Rs2NpcModel araxxor) {
+    private void handleEnrageFight(PlayerSnapshot player, Rs2NpcModel araxxor) {
+        if (config.combatStyle() == AraxxorConfig.CombatStyle.RANGED) {
+            handleEnrageFightRanged(player, araxxor);
+            return;
+        }
+
         state = AraxxorState.ENRAGED_STEP_UNDER;
 
         WorldPoint araxxorLoc = araxxor.getWorldLocation();
@@ -896,7 +1033,7 @@ public class AraxxorScript extends Script {
             WorldPoint cleanSpot = findCleanSpot(playerLoc);
             if (cleanSpot != null && playerLoc.distanceTo(cleanSpot) > 1) {
                 status = "Luring Araxxor to clean area (" + acidNearBoss + " acid tiles)";
-                Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), cleanSpot));
+                moveTo(cleanSpot);
                 if (tickSleep()) return; // dodge takes priority
                 return; // let main loop re-evaluate; Araxxor will follow us
             }
@@ -906,8 +1043,8 @@ public class AraxxorScript extends Script {
         // This prevents the dodge loop: dodgeCleave → handleEnrageFight → walk under
         // (interrupted by next cleave) → dodgeCleave → ... never attacking.
         // By queuing attack before the walk, damage is dealt even if we're interrupted.
-        if (!player.isInteracting()) {
-            Rs2Npc.interact(araxxor, "attack");
+        if (!isTarget(araxxor)) {
+            attackNpc(araxxor);
         }
 
         // ── Step under Araxxor for cleave self-damage ──
@@ -922,11 +1059,36 @@ public class AraxxorScript extends Script {
                         new WorldPoint(araxxorLoc.getX() + 1, araxxorLoc.getY(), araxxorLoc.getPlane()),
                 };
                 WorldPoint best = pickBestTile(adjacent);
-                Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
+                moveTo(best);
             } else {
-                Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), araxxorLoc));
+                moveTo(araxxorLoc);
             }
             if (tickSleep()) return; // dodge takes priority, but attack is already queued
+        }
+
+        tickSleep();
+
+        // Eat if needed during enrage
+        Rs2Player.eatAt(config.eatAtHpPercent());
+        drinkPrayerPotion();
+    }
+
+    /**
+     * Ranged variant of {@link #handleEnrageFight(Player, Rs2NpcModel)}.
+     * The melee step-under trick only benefits players standing adjacent to Araxxor,
+     * so a ranged player simply keeps attacking from range; the main loop's cleave
+     * dodge check (higher priority) already handles repositioning away from danger.
+     */
+    private void handleEnrageFightRanged(PlayerSnapshot player, Rs2NpcModel araxxor) {
+        state = AraxxorState.FIGHTING;
+
+        if (maintainRangedDistance(player, araxxor, 3)) {
+            status = "Staying outside cleave range";
+            return;
+        }
+
+        if (!isTarget(araxxor)) {
+            attackNpc(araxxor);
         }
 
         tickSleep();
@@ -1002,12 +1164,12 @@ public class AraxxorScript extends Script {
      * Candidates are scored via pickBestTile() which now penalizes cleave tiles
      * on both the destination and the path, preventing path-through-damage.
      */
-    private void dodgeCleave(Player player) {
+    private void dodgeCleave(PlayerSnapshot player) {
         state = AraxxorState.ENRAGED_DODGE_CLEAVE;
         WorldPoint loc = player.getWorldLocation();
 
         // Determine dodge distance based on diagonal/corner position
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        Rs2NpcModel araxxor = getNpc(ARAXXOR_ID);
         boolean onCorner = false;
         if (araxxor != null) {
             WorldPoint bossLoc = araxxor.getWorldLocation();
@@ -1053,16 +1215,9 @@ public class AraxxorScript extends Script {
 
         // pickBestTile scores all candidates — cleave tiles on path/destination get +1000/+500 penalty
         WorldPoint best = pickBestTile(candidates.toArray(new WorldPoint[0]));
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
-        sleep(600); // 1 tick for dodge movement to register
+        moveTo(best);
+        tickSleep();
 
-        // Counter-attack immediately after dodging to maintain DPS uptime
-        if (enraged) {
-            Rs2NpcModel bossTarget = Rs2Npc.getNpc(ARAXXOR_ID);
-            if (bossTarget != null) {
-                Rs2Npc.interact(bossTarget, "attack");
-            }
-        }
     }
 
     // ── Acid Special Attack Handling ────────────────────
@@ -1170,33 +1325,35 @@ public class AraxxorScript extends Script {
     }
 
     /**
-     * Pre-compute acid cannon dodge and initiate walk immediately.
+     * Pre-compute the acid cannon dodge destination.
      * Called from event handlers (onAraxxorAnimation, onAcidCannonDetected) to
-     * react on the SAME game tick the cannon is detected, bypassing the main loop delay.
+     * reduce the delay before the script loop issues the movement.
      */
     private void precomputeAndDodgeAcidCannon() {
-        Player player = Microbot.getClient().getLocalPlayer();
+        PlayerSnapshot player = readPlayer();
         if (player == null || acidCannonSourceTile == null) return;
 
         WorldPoint playerLoc = player.getWorldLocation();
         WorldPoint dodge = computeAcidCannonDodge(playerLoc, acidCannonSourceTile);
         precomputedAcidDodge = dodge;
 
-        // Initiate walk IMMEDIATELY — this queues on the current game tick
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), dodge));
-        log("Pre-computed acid dodge → " + dodge + " (immediate walk issued)");
+        // The script loop performs the walk so this event handler never blocks the client thread.
+        log("Pre-computed acid dodge → " + dodge);
     }
 
     /**
      * Fallback acid cannon dodge used by the main loop if pre-computation missed.
      * Uses the same computation but runs on the script thread.
      */
-    private void dodgeAcidCannon(Player player) {
+    private void dodgeAcidCannon(PlayerSnapshot player) {
         state = AraxxorState.DODGING_ACID_BALL;
         WorldPoint playerLoc = player.getWorldLocation();
-        WorldPoint best = computeAcidCannonDodge(playerLoc, acidCannonSourceTile);
+        WorldPoint best = precomputedAcidDodge != null
+                ? precomputedAcidDodge
+                : computeAcidCannonDodge(playerLoc, acidCannonSourceTile);
+        precomputedAcidDodge = null;
 
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
+        moveTo(best);
         tickSleep(); // interruptible — can react to cleave while dodging
         log("Dodged acid cannon (fallback) → " + best);
     }
@@ -1207,7 +1364,7 @@ public class AraxxorScript extends Script {
      *
      * @return true if an acid cannon was dodged (caller should re-evaluate state)
      */
-    private boolean checkAndDodgeAcidCannon(Player player) {
+    private boolean checkAndDodgeAcidCannon(PlayerSnapshot player) {
         if (acidCannonIncoming) {
             status = "Dodging acid cannon (during adds)!";
             dodgeAcidCannon(player);
@@ -1224,14 +1381,20 @@ public class AraxxorScript extends Script {
      * move 1 tile off, attack the boss, then repeat. This avoids all acid pools
      * while maintaining DPS uptime and staying in melee range.
      * <p>
-     * We alternate between two phases each loop tick:
+     * We advance through three phases across loop iterations:
      *   Phase 0: Walk onto Araxxor's tile (step under)
-     *   Phase 1: Move 1 tile adjacent, then attack
+     *   Phase 1: Move 1 tile adjacent
+     *   Phase 2: Attack after the movement is observed
      */
-    private void handleAcidDrip(Player player) {
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
-        if (araxxor == null) {
+    private void handleAcidDrip(PlayerSnapshot player) {
+        Rs2NpcModel araxxor = getNpc(ARAXXOR_ID);
+        if (araxxor == null || isDead(araxxor)) {
             acidDripActive = false;
+            return;
+        }
+
+        if (config.combatStyle() == AraxxorConfig.CombatStyle.RANGED) {
+            handleAcidDripRanged(player, araxxor);
             return;
         }
 
@@ -1241,13 +1404,13 @@ public class AraxxorScript extends Script {
         if (acidDripPhase == 0) {
             // Phase 0: step under boss — puddle drops at our previous location
             if (playerLoc.distanceTo(araxxorLoc) > 0) {
-                Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), araxxorLoc));
+                moveTo(araxxorLoc);
+                return;
             }
-            tickSleep();
             acidDripPhase = 1;
-        } else {
-            // Phase 1: step 1 tile off boss + attack in same tick (tick manipulation)
-            // Both walk and attack queue for the next server tick
+        } else if (acidDripPhase == 1) {
+            // Phase 1: step one tile off the boss. attackNpc deliberately refuses to
+            // act while movement is pending, so the attack is issued in phase 2.
             WorldPoint[] candidates = {
                     new WorldPoint(araxxorLoc.getX(), araxxorLoc.getY() - 1, araxxorLoc.getPlane()),  // south (preferred)
                     new WorldPoint(araxxorLoc.getX() + 1, araxxorLoc.getY(), araxxorLoc.getPlane()),  // east
@@ -1256,11 +1419,41 @@ public class AraxxorScript extends Script {
             };
 
             WorldPoint stepOff = pickBestTile(candidates);
-            Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), stepOff));
-            Rs2Npc.interact(araxxor, "attack"); // Walk + attack queue for same tick
-            tickSleep();
+            moveTo(stepOff);
+            acidDripPhase = 2;
+        } else {
+            // The main loop's movementPending guard ensures the step-off was observed.
+            attackNpc(araxxor);
             acidDripPhase = 0;
         }
+        tickSleep();
+    }
+
+    /**
+     * Ranged variant of {@link #handleAcidDrip(Player)}.
+     * A ranged player isn't standing adjacent to Araxxor, so the melee step-under/step-off
+     * choreography (which only exists to avoid the puddle dropped at the player's own feet)
+     * doesn't apply. Instead, just keep attacking and step off the current tile if it is
+     * (or is about to become) an acid pool.
+     */
+    private void handleAcidDripRanged(PlayerSnapshot player, Rs2NpcModel araxxor) {
+        WorldPoint playerLoc = player.getWorldLocation();
+
+        if (isOnAcidPool(playerLoc)) {
+            WorldPoint[] candidates = {
+                    new WorldPoint(playerLoc.getX(), playerLoc.getY() - 1, playerLoc.getPlane()),
+                    new WorldPoint(playerLoc.getX() + 1, playerLoc.getY(), playerLoc.getPlane()),
+                    new WorldPoint(playerLoc.getX() - 1, playerLoc.getY(), playerLoc.getPlane()),
+                    new WorldPoint(playerLoc.getX(), playerLoc.getY() + 1, playerLoc.getPlane()),
+            };
+            WorldPoint best = pickBestTile(candidates);
+            moveTo(best);
+        }
+
+        if (!isTarget(araxxor)) {
+            attackNpc(araxxor);
+        }
+        tickSleep();
     }
 
     // ── Defence Drain Special Attack ────────────────────
@@ -1272,8 +1465,8 @@ public class AraxxorScript extends Script {
      * Supports dual-spec: performs up to {@code config.specCount()} spec hits per fight.
      * After all spec hits land, optionally drinks a surge potion before switching back.
      */
-    private boolean performSpecialAttack(Rs2NpcModel araxxor) {
-        int specEnergy = Microbot.getClient().getVarpValue(300) / 10; // 0–100
+    private boolean performSpecialAttack(PlayerSnapshot player, Rs2NpcModel araxxor) {
+        int specEnergy = readClient(() -> Microbot.getClient().getVarpValue(300)) / 10; // 0–100
         String specWeapon = config.specWeapon().toLowerCase();
         int specPerHit = specWeapon.contains("dragon warhammer") ? 50 : 50; // both 50%
         int hitsRemaining = config.specCount() - specHitsCompleted;
@@ -1295,6 +1488,7 @@ public class AraxxorScript extends Script {
             // Wait for the weapon to actually equip
             sleepUntil(() -> Rs2Equipment.isWearing(config.specWeapon()), 1200);
         }
+        managePrayers(player, araxxor);
 
         // Perform spec hits (one per call, loop returns to main loop so dodges are checked)
         status = "Spec " + (specHitsCompleted + 1) + "/" + config.specCount() + ": " + config.specWeapon();
@@ -1306,19 +1500,21 @@ public class AraxxorScript extends Script {
         if (tickSleep()) { switchToMainWeapon(); return true; }
 
         // Attack araxxor with spec enabled
-        Rs2Npc.interact(araxxor, "attack");
+        attackNpc(araxxor, true);
         tickSleep();
 
         // Wait for the hit to register (player animation plays)
-        sleepUntil(() -> Microbot.getClient().getLocalPlayer() != null
-                && Microbot.getClient().getLocalPlayer().getAnimation() != -1, 1800);
+        if (!sleepUntil(() -> readClient(() -> Microbot.getClient().getVarpValue(300)) / 10 < specEnergy, 1800)) {
+            status = "Special attack not observed — retrying";
+            return true;
+        }
         tickSleep(); // Let the hit land
 
         specHitsCompleted++;
         log("Spec hit " + specHitsCompleted + "/" + config.specCount() + " landed");
 
         // If we still have hits remaining AND enough energy, stay on spec weapon for next loop iteration
-        int energyAfter = Microbot.getClient().getVarpValue(300) / 10;
+        int energyAfter = readClient(() -> Microbot.getClient().getVarpValue(300)) / 10;
         if (specHitsCompleted < config.specCount() && energyAfter >= specPerHit) {
             // Don't switch back yet — main loop will call us again next iteration
             return true;
@@ -1355,9 +1551,15 @@ public class AraxxorScript extends Script {
 
     private void drinkPotions() {
         CombatPotionType potionType = config.combatPotionType();
+        if (potionType == CombatPotionType.AUTO) {
+            potionType = config.combatStyle() == AraxxorConfig.CombatStyle.RANGED
+                    ? CombatPotionType.RANGING
+                    : CombatPotionType.SUPER_COMBAT;
+        }
         if (potionType != CombatPotionType.NONE) {
-            boolean hasCombatBoost = Microbot.getClient().getBoostedSkillLevel(Skill.STRENGTH)
-                    > Microbot.getClient().getRealSkillLevel(Skill.STRENGTH);
+            Skill boostedSkill = potionType.getBoostedSkill();
+            boolean hasCombatBoost = readClient(() -> Microbot.getClient().getBoostedSkillLevel(boostedSkill))
+                    > readClient(() -> Microbot.getClient().getRealSkillLevel(boostedSkill));
             if (!hasCombatBoost) {
                 Rs2Inventory.interact(potionType.getInventoryName(), "drink");
                 tickSleep();
@@ -1373,8 +1575,8 @@ public class AraxxorScript extends Script {
     }
 
     private void drinkPrayerPotion() {
-        int prayerPercent = (Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER) * 100)
-                / Math.max(1, Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
+        int prayerPercent = (readClient(() -> Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER)) * 100)
+                / Math.max(1, readClient(() -> Microbot.getClient().getRealSkillLevel(Skill.PRAYER)));
         if (prayerPercent < config.drinkPrayerAtPercent()) {
             Rs2Inventory.interact(Rs2Potion.getPrayerPotionsVariants().toArray(String[]::new), "drink");
             tickSleep();
@@ -1383,23 +1585,61 @@ public class AraxxorScript extends Script {
 
     // ── Prayer Management ───────────────────────────────
 
-    private void managePrayers() {
-        if (config.protectFromMelee()) {
+    private void managePrayers(PlayerSnapshot player, Rs2NpcModel araxxor) {
+        int meleeRange = enraged ? 2 : 1;
+        WorldArea araxxorArea = readClient(araxxor::getWorldArea);
+        boolean inMeleeRange = araxxorArea != null
+                && araxxorArea.distanceTo(player.getWorldLocation()) <= meleeRange;
+        if (inMeleeRange && config.protectFromMelee()) {
             Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
+        } else if (config.protectFromMissiles()) {
+            Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_RANGE, true);
         }
-        if (config.usePiety()) {
-            if (Microbot.getClient().getRealSkillLevel(Skill.PRAYER) >= 70
-                    && Microbot.getClient().getRealSkillLevel(Skill.DEFENCE) >= 70) {
-                Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, true);
+
+        int prayerLevel = readClient(() -> Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
+        int defenceLevel = readClient(() -> Microbot.getClient().getRealSkillLevel(Skill.DEFENCE));
+        if (isRangedWeaponEquipped()) {
+            if (config.useRigour() && prayerLevel >= Rs2PrayerEnum.RIGOUR.getLevel() && defenceLevel >= 70) {
+                Rs2Prayer.toggle(Rs2PrayerEnum.RIGOUR, true);
             }
+        } else if (config.usePiety()
+                && prayerLevel >= Rs2PrayerEnum.PIETY.getLevel()
+                && defenceLevel >= 70) {
+            Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, true);
         }
+    }
+
+    private boolean isRangedWeaponEquipped() {
+        String rangedWeapon = config.rangedWeapon().trim();
+        if (!rangedWeapon.isEmpty() && Rs2Equipment.isWearing(rangedWeapon)) return true;
+
+        String araxWeapon = config.araxyteSwitchWeapon().trim();
+        if (!araxWeapon.isEmpty() && isBallista(araxWeapon) && Rs2Equipment.isWearing(araxWeapon)) return true;
+
+        String mainWeapon = config.mainWeapon().trim();
+        if (!mainWeapon.isEmpty() && Rs2Equipment.isWearing(mainWeapon)) return false;
+        String specWeapon = config.specWeapon().trim();
+        if (!specWeapon.isEmpty() && Rs2Equipment.isWearing(specWeapon)) return false;
+        if (!araxWeapon.isEmpty() && !isBallista(araxWeapon) && Rs2Equipment.isWearing(araxWeapon)) return false;
+        return config.combatStyle() == AraxxorConfig.CombatStyle.RANGED;
     }
 
     private void togglePrayers(boolean on) {
         if (Rs2Prayer.isOutOfPrayer()) return;
-        Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, on);
-        if (config.usePiety()) {
-            Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, on);
+        if (!on) {
+            Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, false);
+            Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_RANGE, false);
+            Rs2Prayer.toggle(Rs2PrayerEnum.RIGOUR, false);
+            Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, false);
+            return;
+        }
+
+        if (isRangedWeaponEquipped()) {
+            Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_RANGE, true);
+            if (config.useRigour()) Rs2Prayer.toggle(Rs2PrayerEnum.RIGOUR, true);
+        } else {
+            Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
+            if (config.usePiety()) Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, true);
         }
     }
 
@@ -1438,8 +1678,8 @@ public class AraxxorScript extends Script {
      *   (playerX-1, playerY), (playerX, playerY), (playerX+1, playerY)
      */
     public void computeCleaveTiles() {
-        Player player = Microbot.getClient().getLocalPlayer();
-        Rs2NpcModel araxxor = Rs2Npc.getNpc(ARAXXOR_ID);
+        PlayerSnapshot player = readPlayer();
+        Rs2NpcModel araxxor = getNpc(ARAXXOR_ID);
         if (player == null || araxxor == null) return;
 
         WorldPoint playerLoc = player.getWorldLocation();
@@ -1526,7 +1766,7 @@ public class AraxxorScript extends Script {
             score += 1000;
         }
         // Large penalty if the straight-line path to this tile crosses any acid pool or cleave tile
-        Player player = Microbot.getClient().getLocalPlayer();
+        PlayerSnapshot player = readPlayer();
         if (player != null) {
             WorldPoint playerLoc = player.getWorldLocation();
             int acidOnPath = countAcidOnPath(playerLoc, candidate);
@@ -1580,13 +1820,6 @@ public class AraxxorScript extends Script {
     }
 
     /**
-     * Check if the straight-line path from start to end crosses any acid pool.
-     */
-    private boolean pathCrossesAcid(WorldPoint start, WorldPoint end) {
-        return countAcidOnPath(start, end) > 0;
-    }
-
-    /**
      * Pick the best tile from a list of candidates, preferring non-acid tiles
      * with a clean path, closer to arena center. Always returns a tile (never null).
      */
@@ -1597,7 +1830,14 @@ public class AraxxorScript extends Script {
     }
 
     private boolean isOnAcidPool(WorldPoint tile) {
-        return acidPools.contains(tile);
+        if (acidPools.contains(tile)) return true;
+        return Microbot.getRs2TileObjectCache().query()
+                .where(object -> (object.getId() == ACID_POOL_OBJ
+                        || object.getId() == VENOM_PUDDLE_1
+                        || object.getId() == VENOM_PUDDLE_2
+                        || object.getId() == VENOM_PUDDLE_3)
+                        && tile.equals(object.getWorldLocation()))
+                .firstOnClientThread() != null;
     }
 
     /**
@@ -1615,7 +1855,7 @@ public class AraxxorScript extends Script {
      * Walk toward the arena center, dodging acid pools on the way.
      * Moves 2 tiles toward center per call to avoid overshooting.
      */
-    private void returnToCenter(Player player) {
+    private void returnToCenter(PlayerSnapshot player) {
         if (arenaCenter == null) return;
         WorldPoint playerLoc = player.getWorldLocation();
 
@@ -1634,11 +1874,11 @@ public class AraxxorScript extends Script {
         };
 
         WorldPoint best = pickBestTile(candidates);
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
+        moveTo(best);
         tickSleep();
     }
 
-    private void moveOffAcid(Player player) {
+    private void moveOffAcid(PlayerSnapshot player) {
         WorldPoint loc = player.getWorldLocation();
         int[][] offsets = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}};
         WorldPoint[] candidates = new WorldPoint[offsets.length];
@@ -1646,7 +1886,8 @@ public class AraxxorScript extends Script {
             candidates[i] = new WorldPoint(loc.getX() + offsets[i][0], loc.getY() + offsets[i][1], loc.getPlane());
         }
         WorldPoint best = pickBestTile(candidates);
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
+        moveTo(best);
+        escapingAcid = movementDestination != null;
         tickSleep();
     }
 
@@ -1663,22 +1904,23 @@ public class AraxxorScript extends Script {
                 new WorldPoint(from.getX() - normY * distance, from.getY() + normX * distance, from.getPlane()),
         };
         WorldPoint best = pickBestTile(candidates);
-        Rs2Walker.walkFastLocal(LocalPoint.fromWorld(Microbot.getClient(), best));
+        moveTo(best);
     }
 
     // ── Weapon Switching ────────────────────────────────
 
     private void switchToMainWeapon() {
-        String mainWeapon = config.mainWeapon();
-        String shield = config.mainShield();
-        // Queue both equips — weapon and shield can process in the same game tick
-        if (!mainWeapon.isEmpty()) {
-            Rs2Inventory.wield(mainWeapon);
+        boolean ranged = config.combatStyle() == AraxxorConfig.CombatStyle.RANGED;
+        String weapon = ranged ? config.rangedWeapon() : config.mainWeapon();
+        String offhand = ranged ? config.rangedAmmo() : config.mainShield();
+        // Queue both equips — weapon and offhand/ammo can process in the same game tick
+        if (!weapon.isEmpty() && !Rs2Equipment.isWearing(weapon)) {
+            Rs2Inventory.wield(weapon);
         }
-        if (!shield.isEmpty()) {
-            Rs2Inventory.wield(shield);
+        if (!offhand.isEmpty() && !Rs2Equipment.isWearing(offhand)) {
+            Rs2Inventory.wield(offhand);
         }
-        if (!mainWeapon.isEmpty() || !shield.isEmpty()) {
+        if ((!weapon.isEmpty() && !Rs2Equipment.isWearing(weapon)) || (!offhand.isEmpty() && !Rs2Equipment.isWearing(offhand))) {
             tickSleep();
         }
     }
@@ -1686,53 +1928,80 @@ public class AraxxorScript extends Script {
     // ── Post-fight Handling ─────────────────────────────
 
     private void handleNoBoss() {
-        // Check if we're in the looting state
-        if (state == AraxxorState.LOOTING) {
-            status = "Looting...";
+        long now = System.currentTimeMillis();
+        Rs2NpcModel corpse = getNpc(ARAXXOR_DEAD_ID);
+        if (corpse != null) {
+            // Death animation/despawn events can be missed while loading an instance.
+            // Observing the corpse is sufficient evidence to count the kill once.
+            if (!deathProcessed) {
+                onAraxxorDeath();
+            }
+            postFight = true;
+            state = AraxxorState.HARVESTING;
+            lootQuietSince = now;
+            if (now < corpseRetryAt) return;
+            // Re-query each attempt; a click is not evidence of harvesting.
+            status = config.harvestCorpse() ? "Harvesting corpse" : "Destroying corpse";
+            corpse.click(config.harvestCorpse() ? "Harvest" : "Destroy");
+            corpseRetryAt = now + 3000;
+            return;
+        }
+        if (postFight) {
+            state = AraxxorState.LOOTING;
             lootItems();
             return;
         }
-
-        // Check if boss corpse exists for harvesting/destroying
-        Rs2NpcModel deadAraxxor = Rs2Npc.getNpc(ARAXXOR_DEAD_ID);
-        if (deadAraxxor != null) {
-            state = AraxxorState.LOOTING;
-            status = config.harvestCorpse() ? "Harvesting corpse..." : "Destroying corpse...";
-
-            String action = config.harvestCorpse() ? "Harvest" : "Destroy";
-            Rs2Npc.interact(deadAraxxor, action);
-            sleep(1200);
-            return;
-        }
-
-        // If we've killed enough, teleport out
         if (config.maxKillsPerTrip() > 0 && killCount >= config.maxKillsPerTrip()) {
-            status = "Trip complete — teleporting";
             emergencyTeleport();
             return;
         }
-
-        // Check supplies before next fight
-        boolean hasFood = !Rs2Inventory.getInventoryFood().isEmpty();
-        boolean hasPrayerPots = Rs2Inventory.hasItem(Rs2Potion.getPrayerPotionsVariants().toArray(String[]::new));
-
-        if (!hasFood || !hasPrayerPots) {
+        if (Rs2Inventory.getInventoryFood().isEmpty()
+                || !Rs2Inventory.hasItem(Rs2Potion.getPrayerPotionsVariants().toArray(String[]::new))) {
             status = "Low supplies — teleporting";
             emergencyTeleport();
             return;
         }
-
-        // Reset fight state for new encounter — clears enraged/acid/cleave flags
-        // that may have persisted from the previous kill
-        resetFightState();
-
-        // Drink potions and prepare for next fight
-        status = "Waiting for Araxxor to spawn...";
         state = AraxxorState.IDLE;
-        drinkPotions();
-        managePrayers();
+        status = "Waiting for Araxxor";
+        if (config.enterLair() && now >= entryRetryAt) {
+            var entrance = Microbot.getRs2TileObjectCache().query()
+                    .where(object -> object.getId() == ObjectID1.ARAXXOR_CAVE_OUTER_TUNNEL_OP
+                            || object.getId() == ObjectID1.ARAXXOR_CAVE_OUTER_TUNNEL_OP_2
+                            || object.getId() == ObjectID1.ARAXXOR_CAVE_OUTER_TUNNEL_OP_3
+                            || object.getId() == ObjectID1.ARAXXOR_CAVE_OUTER_TUNNEL_OP_4
+                            || object.getId() == ObjectID1.ARAXXOR_BOSS_TUNNEL_MULTI)
+                    .within(10).nearestOnClientThread();
+            if (entrance != null) {
+                String action = readClient(() -> {
+                    ObjectComposition composition = entrance.getObjectComposition();
+                    if (composition == null) return "";
+                    if (composition.getImpostorIds() != null && composition.getImpostor() != null) {
+                        composition = composition.getImpostor();
+                    }
+                    if (composition == null || composition.getActions() == null) return "";
+                    return Arrays.stream(composition.getActions())
+                            .filter(a -> a != null && (a.toLowerCase(Locale.ROOT).contains("enter")
+                                    || a.equalsIgnoreCase("Pass")))
+                            .findFirst().orElse("");
+                });
+                if (!action.isEmpty()) {
+                    state = AraxxorState.ENTERING_LAIR;
+                    status = "Entering lair — awaiting instance";
+                    if (!entrance.click(action)) {
+                        status = "Lair door click failed — retrying";
+                    }
+                    entryRetryAt = now + 5000;
+                    return;
+                }
+                status = "Lair door found, but no enter action";
+                entryRetryAt = now + 2000;
+                return;
+            }
+            status = "No Araxxor lair door within 10 tiles";
+            entryRetryAt = now + 2000;
+        }
+        togglePrayers(false);
     }
-
     /**
      * Reset all per-fight state flags. Called when transitioning to idle between kills
      * to ensure stale enraged/acid/cleave flags from a previous fight don't carry over.
@@ -1741,6 +2010,7 @@ public class AraxxorScript extends Script {
         enraged = false;
         specHitsCompleted = 0;
         araxxorAttackCount = 0;
+        lastRangedRepositionAttack = -1;
         acidDripActive = false;
         acidDripPhase = 0;
         cleaveIncoming = false;
@@ -1750,80 +2020,152 @@ public class AraxxorScript extends Script {
         precomputedAcidDodge = null;
         arenaCenter = null;
         acidPools.clear();
+        movementDestination = null;
+        movementOrigin = null;
+        movementDeadline = 0;
+        escapingAcid = false;
+        corpseRetryAt = 0;
+        pendingLootId = -1;
+        pendingLootTile = null;
+        pendingLootQuantity = 0;
+        lootRetryAt = 0;
+    }
+
+    private boolean wantedLoot(Rs2TileItemModel item) {
+        String name = item.getName();
+        return item.isLootAble() && (item.getTotalValue() >= config.lootPriceThreshold()
+                || Arrays.asList("Noxious point", "Noxious blade", "Noxious pommel", "Araxyte fang",
+                "Araxyte venom sack", "Jar of venom", "Spider cave teleport", "Shark").contains(name)
+                || name != null && (name.startsWith("Prayer potion(") || name.startsWith("Super combat potion(")));
     }
 
     private void lootItems() {
-        togglePrayers(false);
-
-        // Check inventory space — eat food to make room
-        if (Rs2Inventory.isFull()) {
-            boolean hasFood = !Rs2Inventory.getInventoryFood().isEmpty();
-            if (hasFood) {
-                Rs2Player.eatAt(100);
-                tickSleep();
+        long now = System.currentTimeMillis();
+        if (now < lootRetryAt) return;
+        if (pendingLootId != -1) {
+            Rs2TileItemModel remaining = Microbot.getRs2TileItemCache().query()
+                    .withId(pendingLootId)
+                    .where(item -> pendingLootTile.equals(item.getWorldLocation()))
+                    .firstOnClientThread();
+            if (remaining != null && remaining.getQuantity() >= pendingLootQuantity) {
+                status = "Pickup not observed — retrying";
             }
+            pendingLootId = -1;
         }
-
-        LootingParameters params = new LootingParameters(
-                config.lootPriceThreshold(),
-                Integer.MAX_VALUE,
-                20,
-                1,
-                0,
-                false,
-                false
-        );
-
-        // Loot valuable items
-        Rs2GroundItem.lootItemBasedOnValue(params);
-
-        // Always loot unique drops
-        Rs2GroundItem.loot("Noxious point", 20);
-        Rs2GroundItem.loot("Noxious blade", 20);
-        Rs2GroundItem.loot("Noxious pommel", 20);
-        Rs2GroundItem.loot("Araxyte fang", 20);
-        Rs2GroundItem.loot("Araxyte venom sack", 20);
-        Rs2GroundItem.loot("Jar of venom", 20);
-        Rs2GroundItem.loot("Spider cave teleport", 20);
-
-        sleep(600, 1200);
-
-        // Check if done looting
-        if (!Rs2GroundItem.isItemBasedOnValueOnGround(config.lootPriceThreshold(), 20)) {
-            // Pick up supply drops (Araxxor drops food/prayer pots)
-            Rs2GroundItem.loot("Shark", 20);
-            Rs2GroundItem.loot("Prayer potion", 20);
-            Rs2GroundItem.loot("Super combat potion", 20);
-            sleep(600);
-
-            state = AraxxorState.IDLE;
-            status = "Loot complete";
+        Rs2TileItemModel item = Microbot.getRs2TileItemCache().query()
+                .where(this::wantedLoot).within(20).nearestOnClientThread();
+        if (item == null) {
+            // Allow delayed corpse drops to reach the cache before ending this kill.
+            if (now - lootQuietSince >= 2400) {
+                postFight = false;
+                resetFightState();
+                state = AraxxorState.IDLE;
+                status = "Loot complete";
+            }
+            return;
         }
+        lootQuietSince = now;
+        if (Rs2Inventory.isFull() && !(item.isStackable() && Rs2Inventory.hasItem(item.getId()))) {
+            if (!Rs2Inventory.getInventoryFood().isEmpty() && getHpPercent() < 100) {
+                Rs2Player.eatAt(100);
+                lootRetryAt = now + 1800;
+                status = "Making loot space — awaiting inventory";
+            } else {
+                status = "Loot blocked — inventory full";
+            }
+            return;
+        }
+        // Exactly one loot action per iteration. Identity includes tile and quantity.
+        pendingLootId = item.getId();
+        pendingLootTile = item.getWorldLocation();
+        pendingLootQuantity = item.getQuantity();
+        item.pickup();
+        lootRetryAt = now + 2400;
+        status = "Awaiting pickup";
+    }
+    // ── Utility ─────────────────────────────────────────
+    /**
+     * Find the nearest NPC by ID using the Queryable API.
+     *
+     * IMPORTANT: Never use the legacy {@code Rs2Npc.getNpc(...)} helper directly here —
+     * this script runs on a background thread and must go through the cache/query layer
+     * which safely bridges client-thread access.
+     */
+    private Rs2NpcModel getNpc(int id) {
+        return Microbot.getRs2NpcCache().query()
+                .withId(id)
+                .where(npc -> npc.getNpc() != null)
+                // ID-specific encounter lookups do not need a distance sort. Using
+                // nearest here also reads the player cache, which can briefly contain
+                // a null actor while login or an instance transition is completing.
+                .firstOnClientThread();
     }
 
-    // ── Utility ─────────────────────────────────────────
+    private boolean isDead(Rs2NpcModel npc) {
+        return npc == null || readClient(npc::isDead);
+    }
+    private boolean attackNpc(Rs2NpcModel target) {
+        return attackNpc(target, false);
+    }
+
+    private boolean attackNpc(Rs2NpcModel target, boolean forceClick) {
+        if (target == null || movementPending() || (!forceClick && isTarget(target))) {
+            return false;
+        }
+
+        Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            if (Microbot.getClient().isWidgetSelected()) {
+                Microbot.getClient().setWidgetSelected(false);
+            }
+            return true;
+        });
+
+        Rs2NpcModel current = Microbot.getRs2NpcCache().query()
+                .withId(target.getId()).where(npc -> npc.getNpc() == target.getNpc()).firstOnClientThread();
+        boolean clicked = current != null && !isDead(current) && current.click("Attack");
+        if (!clicked) {
+            status = "Unable to attack " + target.getName();
+        }
+        return clicked;
+    }
 
     private void emergencyTeleport() {
         state = AraxxorState.TELEPORTING_AWAY;
         togglePrayers(false);
 
         String teleItem = config.teleportItem();
-        if (!teleItem.isEmpty() && Rs2Inventory.hasItem(teleItem)) {
-            // Try common teleport actions in order
-            if (!Rs2Inventory.interact(teleItem, "break")) {
-                if (!Rs2Inventory.interact(teleItem, "rub")) {
-                    Rs2Inventory.interact(teleItem, "teleport");
-                }
-            }
-            Rs2Player.waitForAnimation();
-            sleepUntil(() -> !Microbot.getClient().isInInstancedRegion(), 5000);
+        if (teleItem.isEmpty() || !Rs2Inventory.hasItem(teleItem)) {
+            failSafe("Emergency teleport item unavailable");
+            return;
+        }
+
+        // Try common teleport actions in order and require an observed interaction.
+        boolean interacted = Rs2Inventory.interact(teleItem, "break")
+                || Rs2Inventory.interact(teleItem, "rub")
+                || Rs2Inventory.interact(teleItem, "teleport");
+        if (!interacted) {
+            failSafe("Emergency teleport interaction failed");
+            return;
+        }
+
+        Rs2Player.waitForAnimation();
+        if (sleepUntil(() -> !readClient(() -> Microbot.getClient().isInInstancedRegion()), 5000)) {
+            shutdown();
+        } else {
+            failSafe("Emergency teleport not observed");
         }
     }
 
+    private void failSafe(String message) {
+        status = message + " — stopped";
+        state = AraxxorState.ERROR;
+        super.shutdown();
+    }
+
     private int getHpPercent() {
-        Client client = Microbot.getClient();
-        int current = client.getBoostedSkillLevel(Skill.HITPOINTS);
-        int max = client.getRealSkillLevel(Skill.HITPOINTS);
+
+        int current = readClient(() -> Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS));
+        int max = readClient(() -> Microbot.getClient().getRealSkillLevel(Skill.HITPOINTS));
         return max > 0 ? (current * 100) / max : 100;
     }
 }

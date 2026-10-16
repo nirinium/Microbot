@@ -26,6 +26,7 @@ public class AraxxorOverlay extends OverlayPanel {
     public Dimension render(Graphics2D graphics) {
         try {
             AraxxorScript script = plugin.getScript();
+            boolean loopRunning = script.isRunning();
 
             panelComponent.setPreferredSize(new Dimension(220, 0));
             panelComponent.getChildren().add(TitleComponent.builder()
@@ -36,7 +37,8 @@ public class AraxxorOverlay extends OverlayPanel {
             // Status
             panelComponent.getChildren().add(LineComponent.builder()
                     .left("Status:")
-                    .right(script.getStatus())
+                    .right(loopRunning ? script.getStatus() : "Loop stopped: " + script.getStatus())
+                    .rightColor(loopRunning ? Color.WHITE : Color.RED)
                     .build());
 
             // State

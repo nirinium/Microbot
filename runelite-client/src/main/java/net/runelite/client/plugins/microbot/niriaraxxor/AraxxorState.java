@@ -33,7 +33,9 @@ public enum AraxxorState {
     SPEC_ATTACK,
 
     // Post-fight
+    HARVESTING,
     LOOTING,
+    ERROR,
     DEAD,
     TELEPORTING_AWAY
 }

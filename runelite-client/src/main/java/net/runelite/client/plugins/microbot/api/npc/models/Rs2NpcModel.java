@@ -194,32 +194,35 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
         try {
             if (CantReachTargetRecovery.shouldStart(
                     Microbot.isCantReachTargetDetectionEnabled, Microbot.cantReachTarget)) {
-                if (!hasLineOfSight()) {
-                    if (CantReachTargetRecovery.retryExhausted(
-                            Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
-                        Microbot.pauseAllScripts.compareAndSet(false, true);
-                        Microbot.showMessage("Your bot tried to interact with an NPC for "
-                                + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
-                        return false;
-                    }
-                    final WorldPoint npcWorldPoint = getWorldLocation();
-                    if (npcWorldPoint == null) {
-                        log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npcName, action);
-                        return false;
-                    }
-                    Microbot.cantReachTargetRetries++;
-                    if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
-                        Microbot.pauseAllScripts.compareAndSet(true, false);
-                        Microbot.cantReachTarget = false;
-                        Microbot.cantReachTargetRetries = 0;
-                        // fall through and click from beside it
-                    } else {
-                        return false;
-                    }
-                } else {
+                // The game itself said "I can't reach that!" on the previous interaction — a shut
+                // door, wall, or obstacle sits between us and the target. The walker is the only
+                // recovery that OPENS doors/routes around obstacles, so walk to the NPC and
+                // re-click on arrival. A line-of-sight check must NOT gate this: an NPC can be
+                // fully visible (clear LOS) while still being pathing-unreachable (e.g. across a
+                // wall/pillar or acid pool), in which case the old LOS-gated branch cleared the
+                // flag without ever walking, so the target clicked forever without escalating.
+                // See net.runelite.client.plugins.microbot.util.npc.Rs2Npc#interact(Rs2NpcModel, String)
+                // for the equivalent, previously-fixed legacy behavior this mirrors.
+                if (CantReachTargetRecovery.retryExhausted(
+                        Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
+                    Microbot.pauseAllScripts.compareAndSet(false, true);
+                    Microbot.showMessage("Your bot tried to interact with an NPC for "
+                            + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
+                    return false;
+                }
+                final WorldPoint npcWorldPoint = getWorldLocation();
+                if (npcWorldPoint == null) {
+                    log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npcName, action);
+                    return false;
+                }
+                Microbot.cantReachTargetRetries++;
+                if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
                     Microbot.pauseAllScripts.compareAndSet(true, false);
                     Microbot.cantReachTarget = false;
                     Microbot.cantReachTargetRetries = 0;
+                    // fall through and click from beside it
+                } else {
+                    return false;
                 }
             }
 

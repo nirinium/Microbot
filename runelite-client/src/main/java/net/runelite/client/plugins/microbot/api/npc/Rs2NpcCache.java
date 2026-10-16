@@ -9,6 +9,7 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.api.npc.models.Rs2NpcModel;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -20,8 +21,8 @@ public final class Rs2NpcCache {
     private final Client client;
     private final ClientThread clientThread;
 
-    private int lastUpdateNpcs = 0;
-    private List<Rs2NpcModel> npcs = new ArrayList<>();
+    private volatile int lastUpdateNpcs = 0;
+    private volatile List<Rs2NpcModel> npcs = new ArrayList<>();
 
     @Inject
     public Rs2NpcCache(Client client, ClientThread clientThread) {
@@ -39,28 +40,36 @@ public final class Rs2NpcCache {
      * @return Stream of Rs2NpcModel
      */
     public Stream<Rs2NpcModel> getStream() {
-        if (lastUpdateNpcs >= client.getTickCount()) {
-            return npcs.stream();
-        }
-
-        List<Rs2NpcModel> result = new ArrayList<>();
-
-        for (var id : Microbot.getWorldViewIds()) {
-            WorldView worldView = client.getWorldView(id);
-            if (worldView == null) {
-                continue;
+        // NPC/world-view state (client.getTickCount(), worldView.npcs()) must only be
+        // touched on the client thread. Reading it from a script's executor thread while
+        // the client thread concurrently spawns/despawns NPCs can throw or silently hand
+        // back a stale/corrupted list, which surfaced as combat scripts failing to find
+        // any attackable NPCs. Mirrors the pattern already used by Rs2TileObjectCache.
+        return clientThread.runOnClientThreadOptional(() -> {
+            int tick = client.getTickCount();
+            if (lastUpdateNpcs >= tick) {
+                return npcs;
             }
 
-            result.addAll(worldView.npcs()
-                    .stream()
-                    .filter(Objects::nonNull)
-                    .map(Rs2NpcModel::new)
-                    .collect(Collectors.toList()));
-        }
+            List<Rs2NpcModel> result = new ArrayList<>();
 
-        npcs = result;
-        lastUpdateNpcs = client.getTickCount();
-        return result.stream();
+            for (var id : Microbot.getWorldViewIds()) {
+                WorldView worldView = client.getWorldView(id);
+                if (worldView == null) {
+                    continue;
+                }
+
+                result.addAll(worldView.npcs()
+                        .stream()
+                        .filter(Objects::nonNull)
+                        .map(Rs2NpcModel::new)
+                        .collect(Collectors.toList()));
+            }
+
+            npcs = result;
+            lastUpdateNpcs = tick;
+            return result;
+        }).orElse(Collections.emptyList()).stream();
     }
 
     /**

@@ -1,7 +1,6 @@
 package net.runelite.client.plugins.microbot.nirifighter.bank;
 
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.GameObject;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
@@ -14,13 +13,13 @@ import net.runelite.client.plugins.microbot.nirifighter.enums.State;
 import net.runelite.client.plugins.microbot.nirifighter.shop.ShopItem;
 import net.runelite.client.plugins.microbot.nirifighter.shop.ShopScript;
 import net.runelite.client.plugins.microbot.nirifighter.shop.ShopType;
+import net.runelite.client.plugins.microbot.api.tileobject.models.Rs2TileObjectModel;
 import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.inventorysetups.MInventorySetupsPlugin;
 import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.bank.enums.BankLocation;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.math.Rs2Random;
@@ -44,6 +43,7 @@ public class BankerScript extends Script {
     boolean initialized = false;
     public static boolean inventorySetupChanged = false;
     private static boolean bankingTriggered = false;
+    private static String missingSetupWarned = null;
     @Inject
     private MInventorySetupsPlugin inventorySetupsPlugin;
 
@@ -58,12 +58,14 @@ public class BankerScript extends Script {
             try {
                 if (!Microbot.isLoggedIn()) return;
                 if(!super.run()) return;
+                WorldPoint playerLocation = Rs2Player.getWorldLocation();
+                if (playerLocation == null) return;
                 if (config.bank() && needBanking() && !NiriFighterPlugin.needShopping) {
                     if(handleBanking()){
                         Microbot.log("Banking handled successfully.");
                     }
                 } else if (!needBanking() &&
-                        config.centerLocation().distanceTo(Rs2Player.getWorldLocation()) > config.attackRadius() &&
+                        config.centerLocation().distanceTo(playerLocation) > config.attackRadius() &&
                         !config.centerLocation().equals(new WorldPoint(0, 0, 0))) {
 
                     boolean shouldWalk = false;
@@ -99,9 +101,6 @@ public class BankerScript extends Script {
         return true;
     }
 
-//    public boolean needsBanking() {
-//        return (isUpkeepItemDepleted(config) && config.bank()) || (Rs2Inventory.emptySlotCount() <= config.minFreeSlots() && config.bank()) || needSlayerItems() || inventorySetupChanged;
-//    }
     /**
      * Returns true if the player needs to bank (e.g., missing potions, full inventory).
      */
@@ -163,6 +162,10 @@ public class BankerScript extends Script {
             return false;
         }
         
+        if (!isSetupAvailable(setupName)) {
+            return false;
+        }
+
         Rs2InventorySetup inventorySetup = new Rs2InventorySetup(setupName, mainScheduledFuture);
 
         // (3) If food is required but not available
@@ -208,6 +211,36 @@ public class BankerScript extends Script {
         return false;
     }
 
+
+    private boolean isSetupAvailable(String setupName) {
+        List<InventorySetup> setups = MInventorySetupsPlugin.getInventorySetups();
+        List<String> names = new ArrayList<>();
+        if (setups != null) {
+            for (InventorySetup setup : setups) {
+                if (setup != null) {
+                    names.add(setup.getName());
+                }
+            }
+        }
+        if (isSetupResolvable(names, setupName)) {
+            missingSetupWarned = null;
+            return true;
+        }
+        if (!setupName.equals(missingSetupWarned)) {
+            missingSetupWarned = setupName;
+            Microbot.log("Inventory setup " + setupName + " not found; reselect it in Niri Fighter config");
+        }
+        return false;
+    }
+
+    static boolean isSetupResolvable(Collection<String> setupNames, String setupName) {
+        if (setupNames == null || setupName == null) {
+            return false;
+        }
+        return setupNames.stream()
+                .filter(Objects::nonNull)
+                .anyMatch(name -> name.equalsIgnoreCase(setupName) || name.equals("default"));
+    }
 
     /**
      * Checks if the given setup requires any variant of a specific potion but the player does not have it.
@@ -379,11 +412,18 @@ public class BankerScript extends Script {
                 return;
             }
             
-            Rs2InventorySetup inventorySetup = new Rs2InventorySetup(setupName, mainScheduledFuture);
             if (!Rs2Bank.isOpen()) {
                 Microbot.log("Bank didn't open, returning.");
                 return;
             }
+            if (!isSetupAvailable(setupName)) {
+                Rs2Bank.depositAll();
+                Rs2Inventory.waitForInventoryChanges(2000);
+                bankingTriggered = false;
+                inventorySetupChanged = false;
+                return;
+            }
+            Rs2InventorySetup inventorySetup = new Rs2InventorySetup(setupName, mainScheduledFuture);
             if (config.currentInventorySetup() != null) {
                 Microbot.log("Loading equipment for: " + config.currentInventorySetup().getName());
             } else {
@@ -442,32 +482,11 @@ public class BankerScript extends Script {
 
 
                 }
-//                if( AIOFighterBetaPlugin.needShopping)
-//                    return;
             }
             inventorySetupChanged = false;
         }
 
     }
-
-//    public boolean depositAllExcept(NiriFighterConfig config) {
-//        List<Integer> ids = Arrays.stream(ItemToKeep.values())
-//                .filter(item -> item.isEnabled(config))
-//                .flatMap(item -> item.getIds().stream())
-//                .collect(Collectors.toList());
-//        Rs2Bank.depositAllExcept(ids.toArray(new Integer[0]));
-//        return Rs2Bank.isOpen();
-//    }
-
-//    public boolean isUpkeepItemDepleted(NiriFighterConfig config) {
-//        return Arrays.stream(ItemToKeep.values())
-//                .filter(item -> item != ItemToKeep.TELEPORT && item.isEnabled(config))
-//                .anyMatch(item -> item.getIds().stream().mapToInt(Rs2Inventory::count).sum() == 0);
-//    }
-//
-//    public boolean goToBank() {
-//        return Rs2Walker.walkTo(Rs2Bank.getNearestBank().getWorldPoint(), 8);
-//    }
 
     public boolean handleBanking() {
          NiriFighterPlugin.setState(State.BANKING);
@@ -498,10 +517,15 @@ public class BankerScript extends Script {
             sleepUntil(() -> !Rs2Bank.isOpen(), 2000);
         }
         
-        // Find and use the pool
-        GameObject pool = Rs2GameObject.get("Pool of Refreshment", true);
+        // Find and use the pool. Bound to 20 tiles — replaces the legacy
+        // Rs2GameObject.interact 51-tile walk-to fallback. The new model's click()
+        // does not walk-to-object, so we must guard distance up front to avoid
+        // silently dispatching a click against an unreachable pool.
+        Rs2TileObjectModel pool = Microbot.getRs2TileObjectCache().query()
+                .withName("Pool of Refreshment")
+                .nearestOnClientThread(20);
         if (pool != null) {
-            if (Rs2GameObject.interact(pool, "Drink")) {
+            if (pool.click("Drink")) {
                 sleepUntil(Rs2Player::isMoving, 2000);
                 sleepUntil(() -> !Rs2Player.isMoving(), 5000);
                 sleepUntil(Rs2Player::isAnimating, 2000);
