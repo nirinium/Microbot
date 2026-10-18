@@ -1,6 +1,7 @@
 package net.runelite.client.plugins.microbot.niriaraxxor;
 
 import net.runelite.client.config.Config;
+import net.runelite.client.config.ConfigButton;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigInformation;
 import net.runelite.client.config.ConfigItem;
@@ -36,6 +37,9 @@ public interface AraxxorConfig extends Config {
 
     @ConfigSection(name = "Safety", description = "Safety & teleport settings", position = 4)
     String safetySection = "safety";
+
+    @ConfigSection(name = "Diagnostics", description = "Fight timeline diagnostics", position = 5)
+    String diagnosticsSection = "diagnostics";
 
     // ── Combat ──────────────────────────────────────────
 
@@ -156,21 +160,10 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "prioritizeAraxytes",
-            name = "Prioritize araxytes",
-            description = "Immediately focus spawned araxytes; attacks ruptura from a safe distance instead of waiting for its pathing",
-            position = 10,
-            section = combatSection
-    )
-    default boolean prioritizeAraxytes() {
-        return true;
-    }
-
-    @ConfigItem(
             keyName = "killAcidicAraxytes",
             name = "Kill acidic araxytes",
             description = "Kill acidic (green) araxytes or ignore them and tank",
-            position = 11,
+            position = 10,
             section = combatSection
     )
     default boolean killAcidicAraxytes() {
@@ -178,13 +171,13 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "lureRupturaToAraxxor",
-            name = "Lure ruptura to Araxxor",
-            description = "Lure red (ruptura) araxytes to explode under Araxxor for extra damage",
-            position = 12,
+            keyName = "stayInMeleeRangeDuringEnrage",
+            name = "Enrage: stay in melee range",
+            description = "For ranged setups, return to a safe tile within Araxxor's melee distance during weapon cooldowns",
+            position = 11,
             section = combatSection
     )
-    default boolean lureRupturaToAraxxor() {
+    default boolean stayInMeleeRangeDuringEnrage() {
         return true;
     }
 
@@ -192,7 +185,7 @@ public interface AraxxorConfig extends Config {
             keyName = "useThralls",
             name = "Use Thralls",
             description = "Summon a thrall using the Arceuus spellbook (requires Book of the Dead and runes)",
-            position = 13,
+            position = 12,
             section = combatSection
     )
     default boolean useThralls() {
@@ -203,11 +196,34 @@ public interface AraxxorConfig extends Config {
             keyName = "thrallType",
             name = "Thrall type",
             description = "Which type of thrall to summon (Magic = ghost, Ranged = skeleton, Melee = zombie)",
-            position = 14,
+            position = 13,
             section = combatSection
     )
     default ThrallType thrallType() {
         return ThrallType.MELEE;
+    }
+
+    @ConfigItem(
+            keyName = "forceEnrageAttackClicks",
+            name = "Enrage: queue every attack",
+            description = "Re-click Araxxor whenever the primary weapon is ready to prevent movement from leaving the player idle",
+            position = 14,
+            section = combatSection
+    )
+    default boolean forceEnrageAttackClicks() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "enragePostDodgeDelayTicks",
+            name = "Enrage: post-dodge delay",
+            description = "Ticks to wait after reaching safety before attacking (0 = fastest DPS; increase only if attacks pull you back into danger)",
+            position = 15,
+            section = combatSection
+    )
+    @Range(min = 0, max = 2)
+    default int enragePostDodgeDelayTicks() {
+        return 0;
     }
 
     // ── Prayer ──────────────────────────────────────────
@@ -257,10 +273,21 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "protectFromMagic",
+            name = "Protect from Magic",
+            description = "Use Protect from Magic when Araxxor's latest outside-melee attack is magic",
+            position = 4,
+            section = prayerSection
+    )
+    default boolean protectFromMagic() {
+        return true;
+    }
+
+    @ConfigItem(
             keyName = "drinkPrayerAtPercent",
             name = "Drink prayer at %",
             description = "Drink prayer potion when prayer points drop below this percentage",
-            position = 4,
+            position = 5,
             section = prayerSection
     )
     @Range(min = 10, max = 80)
@@ -318,11 +345,56 @@ public interface AraxxorConfig extends Config {
 
     // ── Safety ──────────────────────────────────────────
 
-    @ConfigItem(keyName = "enterLair", name = "Enter nearby lair",
-            description = "Enter a nearby Araxxor tunnel when supplied; does not travel or bank",
-            position = 4, section = safetySection)
+    @ConfigItem(keyName = "enterLair", name = "Travel to Araxxor",
+            description = "Web-walk to the Morytania Spider Cave, enter it, and continue to Araxxor's tunnel",
+            position = 5, section = safetySection)
     default boolean enterLair() {
         return true;
+    }
+
+    @ConfigItem(
+            keyName = "autoEnterAndFight",
+            name = "Auto-enter and fight",
+            description = "Enter Araxxor's tunnel automatically; disable to wait at the lair door for manual entry",
+            position = 6,
+            section = safetySection
+    )
+    default boolean autoEnterAndFight() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "startingTile",
+            name = "Starting tile",
+            description = "Stable instance-template tile as x,y,plane; use Capture start tile while standing in the arena",
+            position = 7,
+            section = safetySection
+    )
+    default String startingTile() {
+        return "";
+    }
+
+    @ConfigItem(
+            keyName = "captureStartingTile",
+            name = "Capture start tile",
+            description = "Save your current arena tile as the reusable starting tile",
+            position = 8,
+            section = safetySection
+    )
+    default ConfigButton captureStartingTile() {
+        return new ConfigButton();
+    }
+
+    @ConfigItem(
+            keyName = "startingTileRadius",
+            name = "Starting tile radius",
+            description = "Prefer staying within this many tiles of the captured starting tile during combat",
+            position = 9,
+            section = safetySection
+    )
+    @Range(min = 0, max = 6)
+    default int startingTileRadius() {
+        return 2;
     }
 
     @ConfigItem(
@@ -338,10 +410,21 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "adaptiveEating",
+            name = "Adaptive eating",
+            description = "Raise the eat threshold during enrage and acid mechanics while avoiding duplicate food clicks",
+            position = 1,
+            section = safetySection
+    )
+    default boolean adaptiveEating() {
+        return true;
+    }
+
+    @ConfigItem(
             keyName = "emergencyTeleportHp",
             name = "Emergency teleport HP %",
             description = "Teleport out when HP drops below this percentage and no food left",
-            position = 1,
+            position = 2,
             section = safetySection
     )
     @Range(min = 10, max = 50)
@@ -353,22 +436,33 @@ public interface AraxxorConfig extends Config {
             keyName = "maxKillsPerTrip",
             name = "Kills per trip",
             description = "Leave after this many kills (0 = stay until out of supplies)",
-            position = 2,
+            position = 3,
             section = safetySection
     )
     @Range(min = 0, max = 50)
     default int maxKillsPerTrip() {
-        return 0;
+        return 4;
     }
 
     @ConfigItem(
             keyName = "teleportItem",
             name = "Teleport item",
             description = "Item name for emergency teleport (e.g. Teleport to house, Varrock teleport)",
-            position = 3,
+            position = 4,
             section = safetySection
     )
     default String teleportItem() {
         return "Teleport to house";
+    }
+
+    @ConfigItem(
+            keyName = "recordFightTimeline",
+            name = "Record fight timeline",
+            description = "Write a rate-limited ARAXXOR_TRACE timeline to client.log for diagnosing fights",
+            position = 0,
+            section = diagnosticsSection
+    )
+    default boolean recordFightTimeline() {
+        return false;
     }
 }

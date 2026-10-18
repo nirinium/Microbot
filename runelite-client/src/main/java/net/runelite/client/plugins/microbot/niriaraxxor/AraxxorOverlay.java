@@ -28,7 +28,7 @@ public class AraxxorOverlay extends OverlayPanel {
             AraxxorScript script = plugin.getScript();
             boolean loopRunning = script.isRunning();
 
-            panelComponent.setPreferredSize(new Dimension(220, 0));
+            panelComponent.setPreferredSize(new Dimension(360, 0));
             panelComponent.getChildren().add(TitleComponent.builder()
                     .text("Niri Araxxor v" + AraxxorPlugin.VERSION)
                     .color(Color.RED)
@@ -70,6 +70,11 @@ public class AraxxorOverlay extends OverlayPanel {
             panelComponent.getChildren().add(LineComponent.builder()
                     .left("Kills:")
                     .right(String.valueOf(script.getKillCount()))
+                    .build());
+
+            panelComponent.getChildren().add(LineComponent.builder()
+                    .left("Last kill:")
+                    .right(script.getLastKillSummary())
                     .build());
 
             // Enrage indicator

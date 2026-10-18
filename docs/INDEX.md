@@ -9,3 +9,5 @@
 - [Agentic Testing Loop](AGENTIC_TESTING_LOOP.md)
 - [Entity Guides](entity-guides/README.md)
 - [Gallery](gallery.md)
+- [Niri Araxxor Guide](../runelite-client/src/main/java/net/runelite/client/plugins/microbot/niriaraxxor/README.md)
+- [Araxxor Fight Dashboard](ARAXXOR_DASHBOARD.md)

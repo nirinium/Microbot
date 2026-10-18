@@ -5,6 +5,8 @@ This is the documentation entry point. Keep it short: it should route readers to
 ## For Users
 - Installation and launch options: [installation.md](installation.md)
 - Gallery: [gallery.md](gallery.md)
+- Niri Araxxor setup and mechanics: [Araxxor README](../runelite-client/src/main/java/net/runelite/client/plugins/microbot/niriaraxxor/README.md)
+- Araxxor fight dashboard: [ARAXXOR_DASHBOARD.md](ARAXXOR_DASHBOARD.md)
 
 ## For Developers
 - Local setup and build commands: [development.md](development.md)

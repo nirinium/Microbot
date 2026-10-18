@@ -599,6 +599,14 @@ tasks.javadoc {
     title = "RuneLite Client ${project.version} API"
 }
 
+tasks.register<JavaExec>("openAraxxorDashboard") {
+    group = "microbot"
+    description = "Open the local read-only Araxxor fight dashboard"
+    dependsOn(tasks.classes)
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("net.runelite.client.plugins.microbot.niriaraxxor.dashboard.AraxxorDashboardServer")
+}
+
 // Custom task to build nirismelter plugin as standalone JAR
 tasks.register<Jar>("buildNiriSmelterPlugin") {
     group = "microbot"
