@@ -7,6 +7,8 @@ import net.runelite.client.config.ConfigInformation;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
+import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
+import net.runelite.client.plugins.microbot.util.equipment.JewelleryLocationEnum;
 import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
 
 @ConfigGroup(AraxxorConfig.GROUP)
@@ -38,7 +40,10 @@ public interface AraxxorConfig extends Config {
     @ConfigSection(name = "Safety", description = "Safety & teleport settings", position = 4)
     String safetySection = "safety";
 
-    @ConfigSection(name = "Diagnostics", description = "Fight timeline diagnostics", position = 5)
+    @ConfigSection(name = "Banking", description = "Automatic banking and restocking", position = 5)
+    String bankingSection = "banking";
+
+    @ConfigSection(name = "Diagnostics", description = "Fight timeline diagnostics", position = 6)
     String diagnosticsSection = "diagnostics";
 
     // ── Combat ──────────────────────────────────────────
@@ -226,6 +231,17 @@ public interface AraxxorConfig extends Config {
         return 0;
     }
 
+    @ConfigItem(
+            keyName = "rapidCleaveClicks",
+            name = "Enrage: rapid dodge clicks",
+            description = "Reassert each cleave dodge with two rapid clicks to reduce swallowed movement commands",
+            position = 16,
+            section = combatSection
+    )
+    default boolean rapidCleaveClicks() {
+        return false;
+    }
+
     // ── Prayer ──────────────────────────────────────────
 
     @ConfigItem(
@@ -398,6 +414,29 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "stayNearArenaCenter",
+            name = "Stay near arena center",
+            description = "Use safe weapon-cooldown ticks to move back toward the arena center",
+            position = 10,
+            section = safetySection
+    )
+    default boolean stayNearArenaCenter() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "arenaCenterRadius",
+            name = "Arena center radius",
+            description = "Maximum preferred distance from the arena center before repositioning",
+            position = 11,
+            section = safetySection
+    )
+    @Range(min = 2, max = 6)
+    default int arenaCenterRadius() {
+        return 4;
+    }
+
+    @ConfigItem(
             keyName = "eatAtHpPercent",
             name = "Eat at HP %",
             description = "Eat food when HP drops below this percentage",
@@ -453,6 +492,63 @@ public interface AraxxorConfig extends Config {
     )
     default String teleportItem() {
         return "Teleport to house";
+    }
+
+    // ── Banking ─────────────────────────────────────────
+
+    @ConfigItem(
+            keyName = "useBanking",
+            name = "Bank between trips",
+            description = "Walk to the nearest bank, load the selected Inventory Setup, and resume after teleporting",
+            position = 0,
+            section = bankingSection
+    )
+    default boolean useBanking() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "inventorySetup",
+            name = "Inventory setup",
+            description = "Inventory Setup used for inventory, equipment, supplies, switches, ammunition, and thrall items",
+            position = 1,
+            section = bankingSection
+    )
+    default InventorySetup inventorySetup() {
+        return null;
+    }
+
+    @ConfigItem(
+            keyName = "usePohBanking",
+            name = "Restore in POH before banking",
+            description = "Teleport home, drink from the ornate rejuvenation pool, then use the ornate jewellery box",
+            position = 2,
+            section = bankingSection
+    )
+    default boolean usePohBanking() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "pohJewelleryDestination",
+            name = "Jewellery box destination",
+            description = "Destination used before walking to the nearest bank; requires that destination in the ornate jewellery box",
+            position = 3,
+            section = bankingSection
+    )
+    default JewelleryLocationEnum pohJewelleryDestination() {
+        return JewelleryLocationEnum.GRAND_EXCHANGE;
+    }
+
+    @ConfigItem(
+            keyName = "returnViaPohFairyRing",
+            name = "Return via POH fairy ring",
+            description = "After banking, teleport home and use fairy ring BKR before web-walking to Araxxor; requires fairy-ring access and a staff unless Lumbridge Elite is complete",
+            position = 4,
+            section = bankingSection
+    )
+    default boolean returnViaPohFairyRing() {
+        return true;
     }
 
     @ConfigItem(

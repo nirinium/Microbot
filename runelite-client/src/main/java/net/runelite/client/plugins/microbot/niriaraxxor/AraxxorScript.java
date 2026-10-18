@@ -13,6 +13,7 @@ import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.gameval.ObjectID1;
 import net.runelite.api.gameval.SpotanimID;
 import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.statemachine.StateMachineScript;
 import net.runelite.client.plugins.microbot.statemachine.Transition;
 import java.util.List;
@@ -22,7 +23,11 @@ import net.runelite.client.plugins.microbot.api.npc.models.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.api.tileitem.models.Rs2TileItemModel;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
+import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
+import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
+import net.runelite.client.plugins.microbot.util.equipment.JewelleryLocationEnum;
+import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.magic.thralls.Rs2Thrall;
@@ -32,6 +37,7 @@ import net.runelite.client.plugins.microbot.util.misc.Rs2Potion;
 import net.runelite.client.plugins.microbot.util.misc.Rs2Food;
 import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.poh.PohTeleports;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
@@ -105,11 +111,16 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private static final int VENOM_PUDDLE_1 = ObjectID1.ARAXXOR_VENOM_PUDDLE01;   // 54255
     private static final int VENOM_PUDDLE_2 = ObjectID1.ARAXXOR_VENOM_PUDDLE02;   // 54256
     private static final int VENOM_PUDDLE_3 = ObjectID1.ARAXXOR_VENOM_PUDDLE03;   // 54257
+    private static final int ARAXXOR_MAX_HITPOINTS = 1020;
+    private static final int ACIDIC_IGNORE_BELOW_HITPOINTS = 100;
+    private static final int RUPTURA_FLEE_DISTANCE = 3;
+    private static final int ENRAGED_RUPTURA_FLEE_DISTANCE = 4;
     /** Keep collision-map work small enough that a script iteration cannot stall the client thread. */
     private static final int MAX_TRAVERSABILITY_CANDIDATES = 24;
     private static final int MAX_TRAVERSABILITY_STEPS = 16;
     private static final WorldPoint SPIDER_CAVE_ENTRANCE = new WorldPoint(3658, 3409, 0);
     private static final WorldPoint ARAXXOR_LAIR_APPROACH = new WorldPoint(3658, 9816, 0);
+    private static final WorldPoint BKR_FAIRY_RING = new WorldPoint(3469, 3431, 0);
 
     private static final String[] BALLISTA_JAVELINS = {
             "Dragon javelin", "Amethyst javelin", "Rune javelin", "Adamant javelin",
@@ -172,6 +183,11 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private volatile boolean acidCannonIncoming = false;
     private volatile WorldPoint acidCannonSourceTile = null;
     private volatile WorldPoint acidCannonOriginTile = null;
+    private WorldPoint acidCannonLaneOriginTile;
+    private int acidCannonDirectionX;
+    private int acidCannonDirectionY;
+    private int acidCannonSafePerpendicularX;
+    private int acidCannonSafePerpendicularY;
     private WorldPoint acidCannonDodgeDestination;
     private volatile long acidCannonHandledUntil = 0;
     private volatile boolean acidCannonExpected;
@@ -184,6 +200,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private volatile Set<WorldPoint> cleaveDangerTiles = new HashSet<>();
     private volatile WorldPoint cleaveOriginTile;
     private WorldPoint cleaveDodgeDestination;
+    private int cleaveRapidClicksRemaining;
+    private long nextCleaveRapidClickAt;
     // Normalized attack direction (Araxxor→Player) at the moment the cleave fired
     private volatile int cleaveAttackDirX = 0;
     private volatile int cleaveAttackDirY = 0;
@@ -193,12 +211,23 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private WorldPoint resolvedStartingTile;
     private boolean startingTileReady;
     private int lastAnchorReturnTick = -1000;
+    private int lastCenterReturnTick = -1000;
     // Approximate arena radius (Araxxor lair is roughly 14-16 tiles across)
     private static final int ARENA_RADIUS = 7;
     // Minimum distance from walls we want to maintain
     private static final int WALL_BUFFER = 2;
 
     private AraxxorConfig config;
+    private Rs2InventorySetup inventorySetupLoader;
+    private String selectedInventorySetupName;
+    private boolean bankingRequired;
+    private long bankingRetryAt;
+    private boolean pohPoolUsed;
+    private enum BankingStep {
+        POH_TELEPORT, POH_RESTORE, POH_JEWELLERY_BOX, BANK,
+        RETURN_POH_TELEPORT, RETURN_POH_FAIRY_RING
+    }
+    private BankingStep bankingStep;
 
     enum EncounterPhase { WAITING, ACTIVE, POST_FIGHT, ERROR }
     private volatile boolean postFight;
@@ -954,6 +983,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         acidCannonOriginTile = player == null ? null : player.getWorldLocation();
         Rs2NpcModel boss = loopBoss;
         acidCannonSourceTile = boss == null ? null : boss.getWorldLocation();
+        lockAcidCannonLane();
         traceEvent(predicted ? "CANNON_PRE_DODGE" : "CANNON_ARMED",
                 "source=" + source + " origin=" + acidCannonOriginTile
                         + " boss=" + acidCannonSourceTile);
@@ -1039,6 +1069,13 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         long now = System.currentTimeMillis();
         Rs2NpcModel araxxor = loopBoss;
 
+        if (config.useBanking() && araxxor == null
+                && (PohTeleports.isInHouse()
+                    || !readClient(() -> Microbot.getClient().isInInstancedRegion()))
+                && handleBanking()) {
+            return;
+        }
+
         if (!acidCannonIncoming && predictedAcidCannonTick >= 0
                 && diagnosticTick >= predictedAcidCannonTick) {
             predictedAcidCannonTick = -1;
@@ -1101,7 +1138,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         if (rupturaUrgent != null && !isDead(rupturaUrgent)) {
             WorldPoint ruptLoc = rupturaUrgent.getWorldLocation();
             int ruptDist = player.getWorldLocation().distanceTo(ruptLoc);
-            if (ruptDist <= 3) {
+            int fleeDistance = enraged ? ENRAGED_RUPTURA_FLEE_DISTANCE : RUPTURA_FLEE_DISTANCE;
+            if (ruptDist <= fleeDistance) {
                 // Getting close! Run 5 tiles away NOW before it reaches our tile
                 status = "FLEE RUPTURA! (" + ruptDist + " tiles)";
                 state = AraxxorState.KILLING_RUPTURA;
@@ -1125,6 +1163,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 if (boss != null) {
                     acidCannonSourceTile = boss.getWorldLocation();
                 }
+                lockAcidCannonLane();
             }
         }
         if (acidCannonIncoming) {
@@ -1241,6 +1280,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             summonThrall();
         }
 
+        if (returnToArenaCenter(player, araxxor)) return;
         if (returnToStartingArea(player, araxxor)) return;
 
         // ── 9. Enrage phase: step-under technique ──
@@ -1331,6 +1371,11 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 || specPhase != SpecPhase.IDLE
                 || diagnosticTick - lastAnchorReturnTick < 6
                 || !routineMovementAllowed()) {
+            return false;
+        }
+
+        if (config.stayNearArenaCenter() && arenaCenter != null
+                && resolvedStartingTile.distanceTo(arenaCenter) > config.arenaCenterRadius()) {
             return false;
         }
 
@@ -1503,10 +1548,10 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         // ── Acidic (green) — ranged attacks, explodes on death ──
         if (config.killAcidicAraxytes()) {
             Rs2NpcModel acidic = getNpc(ACIDIC_ID);
-            if (acidic != null && !isDead(acidic)) {
+            if (acidic != null && !isDead(acidic) && !shouldIgnoreAcidicAraxyte(araxxor)) {
                 return handleAcidic(player, araxxor, acidic);
             }
-            if (acidicKillPending && acidicDeathLocation != null) {
+            if ((acidic == null || isDead(acidic)) && acidicKillPending && acidicDeathLocation != null) {
                 acidicKillPending = false;
                 status = "Escaping acidic death splatter";
                 moveAwayFrom(player.getWorldLocation(), acidicDeathLocation, 4);
@@ -1522,6 +1567,14 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         }
 
         return false;
+    }
+
+    private boolean shouldIgnoreAcidicAraxyte(Rs2NpcModel araxxor) {
+        if (enraged) return true;
+        int healthRatio = araxxor.getHealthRatio();
+        int healthScale = araxxor.getHealthScale();
+        return healthRatio >= 0 && healthScale > 0
+                && healthRatio * ARAXXOR_MAX_HITPOINTS < ACIDIC_IGNORE_BELOW_HITPOINTS * healthScale;
     }
 
     /**
@@ -2129,7 +2182,10 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                     return true;
                 }
             }
-            if (movementDestination != null) return false;
+            if (movementDestination != null) {
+                reassertCleaveDodge();
+                return false;
+            }
         }
 
         Rs2NpcModel araxxor = loopBoss;
@@ -2181,7 +2237,26 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         movementDeadline = 0;
         moveTo(best);
         cleaveDodgeDestination = movementDestination;
+        cleaveRapidClicksRemaining = cleaveDodgeDestination == null ? 0 : 2;
+        nextCleaveRapidClickAt = System.currentTimeMillis() + 75;
         return false;
+    }
+
+    private void reassertCleaveDodge() {
+        if (!config.rapidCleaveClicks() || cleaveRapidClicksRemaining <= 0) return;
+        long now = System.currentTimeMillis();
+        WorldPoint destination = movementDestination;
+        if (now < nextCleaveRapidClickAt || destination == null
+                || !destination.equals(cleaveDodgeDestination) || isOnAcidPool(destination)) {
+            return;
+        }
+        LocalPoint local = readClient(() -> LocalPoint.fromWorld(Microbot.getClient(), destination));
+        if (local == null) return;
+        Rs2Walker.walkFastLocal(local);
+        cleaveRapidClicksRemaining--;
+        nextCleaveRapidClickAt = now + 75;
+        traceEvent("CLEAVE_MOVE_REASSERT", "to=" + destination
+                + " remaining=" + cleaveRapidClicksRemaining);
     }
 
     // ── Acid Special Attack Handling ────────────────────
@@ -2190,68 +2265,19 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
      * Compute the best dodge destination for an acid cannon blast.
      * Pure computation — no side effects, no walking, no sleeping.
      * <p>
-     * Determines the perpendicular escape direction using 2D cross product to
-     * pick the side the player is already on, preventing path-through-blast routing.
+    * Uses the side locked when the cannon was armed so chained movement cannot
+    * reverse across the projectile lane.
      *
      * @param playerLoc  player position at time of detection
      * @param sourceTile Araxxor's position when it fired (blast origin)
      * @return the best dodge destination tile
      */
     private WorldPoint computeAcidCannonDodge(WorldPoint playerLoc, WorldPoint sourceTile) {
-        // Direction vector from boss to player (the blast line)
-        int blastDx = 0;
-        int blastDy = 0;
-        if (sourceTile != null) {
-            blastDx = playerLoc.getX() - sourceTile.getX();
-            blastDy = playerLoc.getY() - sourceTile.getY();
-        }
-
-        // Normalize blast direction to unit-ish vector
-        int normBx = Integer.signum(blastDx);
-        int normBy = Integer.signum(blastDy);
-
-        // Compute TRUE perpendicular: rotate (normBx, normBy) by 90°
-        int perpX1 = normBy;
-        int perpY1 = -normBx;
-        int perpX2 = -normBy;
-        int perpY2 = normBx;
-
-        // If blast direction is zero (boss on our tile or unknown), default to east/west
-        if (perpX1 == 0 && perpY1 == 0) {
-            perpX1 = 1;  perpY1 = 0;
-            perpX2 = -1; perpY2 = 0;
-        }
-
-        // Determine which side of the blast line the player is on via 2D cross product
-        int safePerpX;
-        int safePerpY;
-        if (sourceTile != null) {
-            int toPlayerX = playerLoc.getX() - sourceTile.getX();
-            int toPlayerY = playerLoc.getY() - sourceTile.getY();
-            int cross = normBx * toPlayerY - normBy * toPlayerX;
-
-            if (cross > 0) {
-                safePerpX = perpX1;
-                safePerpY = perpY1;
-            } else if (cross < 0) {
-                safePerpX = perpX2;
-                safePerpY = perpY2;
-            } else {
-                // Exactly on the blast line — pick whichever perp side is closer to center
-                if (arenaCenter != null) {
-                    WorldPoint side1 = new WorldPoint(playerLoc.getX() + perpX1, playerLoc.getY() + perpY1, playerLoc.getPlane());
-                    WorldPoint side2 = new WorldPoint(playerLoc.getX() + perpX2, playerLoc.getY() + perpY2, playerLoc.getPlane());
-                    safePerpX = side1.distanceTo(arenaCenter) <= side2.distanceTo(arenaCenter) ? perpX1 : perpX2;
-                    safePerpY = side1.distanceTo(arenaCenter) <= side2.distanceTo(arenaCenter) ? perpY1 : perpY2;
-                } else {
-                    safePerpX = perpX1;
-                    safePerpY = perpY1;
-                }
-            }
-        } else {
-            safePerpX = perpX1;
-            safePerpY = perpY1;
-        }
+        if (acidCannonLaneOriginTile == null) lockAcidCannonLane();
+        int normBx = acidCannonDirectionX;
+        int normBy = acidCannonDirectionY;
+        int safePerpX = acidCannonSafePerpendicularX;
+        int safePerpY = acidCannonSafePerpendicularY;
 
         // Lead with diagonal escapes: three/four tiles across the blast line and
         // one tile away from Araxxor. This clears the three-wide lane quickly
@@ -2262,14 +2288,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                         playerLoc.getY() + safePerpY * 4 + normBy, playerLoc.getPlane()),
                 new WorldPoint(playerLoc.getX() + safePerpX * 3 + normBx,
                         playerLoc.getY() + safePerpY * 3 + normBy, playerLoc.getPlane()),
-                new WorldPoint(playerLoc.getX() - safePerpX * 4 + normBx,
-                        playerLoc.getY() - safePerpY * 4 + normBy, playerLoc.getPlane()),
-                new WorldPoint(playerLoc.getX() - safePerpX * 3 + normBx,
-                        playerLoc.getY() - safePerpY * 3 + normBy, playerLoc.getPlane()),
                 new WorldPoint(playerLoc.getX() + safePerpX * 4, playerLoc.getY() + safePerpY * 4, playerLoc.getPlane()),
                 new WorldPoint(playerLoc.getX() + safePerpX * 3, playerLoc.getY() + safePerpY * 3, playerLoc.getPlane()),
-                new WorldPoint(playerLoc.getX() - safePerpX * 4, playerLoc.getY() - safePerpY * 4, playerLoc.getPlane()),
-                new WorldPoint(playerLoc.getX() - safePerpX * 3, playerLoc.getY() - safePerpY * 3, playerLoc.getPlane()),
         };
 
         // Cardinal fallbacks — only those on the safe side of the blast line
@@ -2309,16 +2329,16 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                         playerLoc.getY() - radius, playerLoc.getPlane());
                 WorldPoint north = new WorldPoint(playerLoc.getX() + dx,
                         playerLoc.getY() + radius, playerLoc.getPlane());
-                if (hasClearedAcidCannonLine(south)) candidates.add(south);
-                if (hasClearedAcidCannonLine(north)) candidates.add(north);
+                if (isOnSafeCannonSide(south) && hasClearedAcidCannonLine(south)) candidates.add(south);
+                if (isOnSafeCannonSide(north) && hasClearedAcidCannonLine(north)) candidates.add(north);
             }
             for (int dy = -radius + 1; dy < radius; dy++) {
                 WorldPoint west = new WorldPoint(playerLoc.getX() - radius,
                         playerLoc.getY() + dy, playerLoc.getPlane());
                 WorldPoint east = new WorldPoint(playerLoc.getX() + radius,
                         playerLoc.getY() + dy, playerLoc.getPlane());
-                if (hasClearedAcidCannonLine(west)) candidates.add(west);
-                if (hasClearedAcidCannonLine(east)) candidates.add(east);
+                if (isOnSafeCannonSide(west) && hasClearedAcidCannonLine(west)) candidates.add(west);
+                if (isOnSafeCannonSide(east) && hasClearedAcidCannonLine(east)) candidates.add(east);
             }
         }
         return candidates.isEmpty() ? null
@@ -2426,20 +2446,49 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     }
 
     private boolean hasClearedAcidCannonLine(WorldPoint current) {
-        WorldPoint origin = acidCannonOriginTile;
-        WorldPoint source = acidCannonSourceTile;
+        WorldPoint origin = acidCannonLaneOriginTile;
         if (current == null || origin == null || isOnAcidPool(current)) return false;
-        if (source == null) return current.distanceTo(origin) >= 3;
-
-        int blastX = Integer.signum(origin.getX() - source.getX());
-        int blastY = Integer.signum(origin.getY() - source.getY());
-        if (blastX == 0 && blastY == 0) return current.distanceTo(origin) >= 3;
         int moveX = current.getX() - origin.getX();
         int moveY = current.getY() - origin.getY();
-        int perpendicularProgress = Math.abs(moveX * blastY - moveY * blastX);
-        int requiredProgress = blastX != 0 && blastY != 0 ? 4 : 2;
+        int perpendicularProgress = moveX * acidCannonSafePerpendicularX
+            + moveY * acidCannonSafePerpendicularY;
+        int requiredProgress = acidCannonDirectionX != 0 && acidCannonDirectionY != 0 ? 4 : 2;
         return perpendicularProgress >= requiredProgress;
     }
+
+        private boolean isOnSafeCannonSide(WorldPoint tile) {
+        WorldPoint origin = acidCannonLaneOriginTile;
+        if (tile == null || origin == null) return false;
+        int moveX = tile.getX() - origin.getX();
+        int moveY = tile.getY() - origin.getY();
+        return moveX * acidCannonSafePerpendicularX
+            + moveY * acidCannonSafePerpendicularY > 0;
+        }
+
+        private void lockAcidCannonLane() {
+        WorldPoint origin = acidCannonOriginTile;
+        WorldPoint source = acidCannonSourceTile;
+        if (origin == null) return;
+        acidCannonLaneOriginTile = origin;
+        acidCannonDirectionX = source == null ? 0 : Integer.signum(origin.getX() - source.getX());
+        acidCannonDirectionY = source == null ? 0 : Integer.signum(origin.getY() - source.getY());
+        int perpendicularX = acidCannonDirectionY;
+        int perpendicularY = -acidCannonDirectionX;
+        if (perpendicularX == 0 && perpendicularY == 0) perpendicularX = 1;
+        int side = 1;
+        if (arenaCenter != null) {
+            WorldPoint positive = new WorldPoint(origin.getX() + perpendicularX,
+                origin.getY() + perpendicularY, origin.getPlane());
+            WorldPoint negative = new WorldPoint(origin.getX() - perpendicularX,
+                origin.getY() - perpendicularY, origin.getPlane());
+            side = positive.distanceTo(arenaCenter) <= negative.distanceTo(arenaCenter) ? 1 : -1;
+        }
+        acidCannonSafePerpendicularX = perpendicularX * side;
+        acidCannonSafePerpendicularY = perpendicularY * side;
+        traceEvent("CANNON_LANE_LOCKED", "origin=" + origin + " direction="
+            + acidCannonDirectionX + "," + acidCannonDirectionY + " safePerpendicular="
+            + acidCannonSafePerpendicularX + "," + acidCannonSafePerpendicularY);
+        }
 
     /**
      * Check for and dodge an incoming acid cannon attack.
@@ -2950,6 +2999,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         cleaveDangerTiles = new HashSet<>();
         cleaveOriginTile = null;
         cleaveDodgeDestination = null;
+        cleaveRapidClicksRemaining = 0;
+        nextCleaveRapidClickAt = 0;
         cleaveAttackDirX = 0;
         cleaveAttackDirY = 0;
     }
@@ -3083,9 +3134,26 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
      * Walk toward the arena center, dodging acid pools on the way.
      * Moves 2 tiles toward center per call to avoid overshooting.
      */
-    private void returnToCenter(PlayerSnapshot player) {
-        if (arenaCenter == null) return;
+    private boolean returnToArenaCenter(PlayerSnapshot player, Rs2NpcModel araxxor) {
+        if (!config.stayNearArenaCenter() || arenaCenter == null
+                || acidDripActive || acidCannonIncoming || cleaveIncoming
+                || specPhase != SpecPhase.IDLE
+                || diagnosticTick - lastCenterReturnTick < 4
+                || !routineMovementAllowed()
+                || System.currentTimeMillis() < enrageAttackResumeAt) {
+            return false;
+        }
         WorldPoint playerLoc = player.getWorldLocation();
+        int radius = config.arenaCenterRadius();
+        if (playerLoc.distanceTo(arenaCenter) <= radius) return false;
+
+        // Preserve DPS by spending only weapon-cooldown ticks on routine centering.
+        if (diagnosticTick >= nextAttackReadyTick) return false;
+
+        WorldArea bossArea = readClient(araxxor::getWorldArea);
+        if (bossArea == null) return false;
+        int maxBossDistance = config.combatStyle() == AraxxorConfig.CombatStyle.RANGED ? 10 : 2;
+        int minBossDistance = config.combatStyle() == AraxxorConfig.CombatStyle.RANGED ? 2 : 0;
 
         int dx = arenaCenter.getX() - playerLoc.getX();
         int dy = arenaCenter.getY() - playerLoc.getY();
@@ -3093,17 +3161,35 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         int normY = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
 
         // Generate candidates: direct toward center + slight perpendicular offsets
-        WorldPoint[] candidates = {
+        WorldPoint[] rawCandidates = {
                 new WorldPoint(playerLoc.getX() + normX * 2, playerLoc.getY() + normY * 2, playerLoc.getPlane()),
                 new WorldPoint(playerLoc.getX() + normX * 2 + normY, playerLoc.getY() + normY * 2 - normX, playerLoc.getPlane()),
                 new WorldPoint(playerLoc.getX() + normX * 2 - normY, playerLoc.getY() + normY * 2 + normX, playerLoc.getPlane()),
-                // Straight to center if close
                 arenaCenter,
         };
-
-        WorldPoint best = pickBestTile(candidates);
+        java.util.List<WorldPoint> candidates = new ArrayList<>();
+        int currentCenterDistance = playerLoc.distanceTo(arenaCenter);
+        for (WorldPoint tile : rawCandidates) {
+            int bossDistance = bossArea.distanceTo(tile);
+            if (tile.distanceTo(arenaCenter) < currentCenterDistance
+                && bossDistance >= minBossDistance && bossDistance <= maxBossDistance
+                && !isOnAcidPool(tile)
+                && countAcidInArea(tile, 1) == 0
+                && countAcidOnPath(playerLoc, tile) == 0) {
+            candidates.add(tile);
+            }
+        }
+        if (candidates.isEmpty()) return false;
+        WorldPoint best = pickBestImmediateTile(playerLoc, candidates.toArray(new WorldPoint[0]));
+        if (best == null) return false;
+        status = "Returning to arena center";
         moveTo(best);
+        if (movementDestination == null) return false;
+        lastCenterReturnTick = diagnosticTick;
+        traceEvent("CENTER_RETURN", "from=" + playerLoc + " to=" + best
+            + " center=" + arenaCenter + " radius=" + radius);
         tickSleep();
+        return true;
     }
 
     private void moveOffAcid(PlayerSnapshot player) {
@@ -3415,12 +3501,18 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         acidCannonRunWasEnabled = false;
         acidCannonSourceTile = null;
         acidCannonOriginTile = null;
+        acidCannonLaneOriginTile = null;
+        acidCannonDirectionX = 0;
+        acidCannonDirectionY = 0;
+        acidCannonSafePerpendicularX = 0;
+        acidCannonSafePerpendicularY = 0;
         acidCannonDodgeDestination = null;
         acidCannonHandledUntil = 0;
         arenaCenter = null;
         resolvedStartingTile = null;
         startingTileReady = false;
         lastAnchorReturnTick = -1000;
+        lastCenterReturnTick = -1000;
         acidPools.clear();
         movementDestination = null;
         movementOrigin = null;
@@ -3594,20 +3686,213 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         }
 
         // Try common teleport actions in order and require an observed interaction.
-        boolean interacted = Rs2Inventory.interact(teleItem, "break")
-                || Rs2Inventory.interact(teleItem, "rub")
-                || Rs2Inventory.interact(teleItem, "teleport");
+        boolean interacted = interactWithTeleportItem(teleItem);
         if (!interacted) {
             failSafe("Emergency teleport interaction failed");
             return;
         }
 
         Rs2Player.waitForAnimation();
-        if (sleepUntil(() -> !readClient(() -> Microbot.getClient().isInInstancedRegion()), 5000)) {
-            shutdown();
+        if (sleepUntil(() -> PohTeleports.isInHouse()
+            || !readClient(() -> Microbot.getClient().isInInstancedRegion()), 5000)) {
+            if (config.useBanking()) {
+                bankingRequired = true;
+                pohPoolUsed = false;
+            bankingStep = config.usePohBanking()
+                ? (PohTeleports.isInHouse() ? BankingStep.POH_RESTORE : BankingStep.POH_TELEPORT)
+                : BankingStep.BANK;
+                state = AraxxorState.BANKING;
+            status = bankingStep == BankingStep.POH_RESTORE
+                ? "Teleport complete — restoring in POH"
+                : "Teleport complete — heading to bank";
+            } else {
+                shutdown();
+            }
         } else {
             failSafe("Emergency teleport not observed");
         }
+    }
+
+    private boolean handleBanking() {
+        InventorySetup setup = config.inventorySetup();
+        if (setup == null) {
+            failSafe("Banking enabled but no Inventory Setup selected");
+            return true;
+        }
+        if (inventorySetupLoader == null || !setup.getName().equals(selectedInventorySetupName)) {
+            selectedInventorySetupName = setup.getName();
+            inventorySetupLoader = new Rs2InventorySetup(setup, mainScheduledFuture);
+        }
+        if (!bankingRequired
+                && inventorySetupLoader.doesInventoryMatch()
+                && inventorySetupLoader.doesEquipmentMatch()) {
+            return false;
+        }
+
+        state = AraxxorState.BANKING;
+        togglePrayers(false);
+        long now = System.currentTimeMillis();
+        if (now < bankingRetryAt) {
+            return true;
+        }
+
+        if (bankingStep == null) {
+            bankingStep = config.usePohBanking() ? BankingStep.POH_TELEPORT : BankingStep.BANK;
+        } else if (!config.usePohBanking() && !PohTeleports.isInHouse()) {
+            bankingStep = BankingStep.BANK;
+        }
+
+        if (bankingStep == BankingStep.POH_TELEPORT) {
+            if (PohTeleports.isInHouse()) {
+                bankingStep = BankingStep.POH_RESTORE;
+                return true;
+            }
+            String teleItem = config.teleportItem();
+            if (teleItem.isEmpty() || !Rs2Inventory.hasItem(teleItem)) {
+                failSafe("POH banking requires the configured teleport item");
+                return true;
+            }
+            status = "Teleporting to POH";
+            if (!interactWithTeleportItem(teleItem)) {
+                status = "Unable to use POH teleport — retrying";
+                bankingRetryAt = now + 1_000;
+                return true;
+            }
+            bankingRetryAt = now + 4_000;
+            return true;
+        }
+
+        if (bankingStep == BankingStep.POH_RESTORE) {
+            if (!PohTeleports.isInHouse()) {
+                bankingStep = BankingStep.POH_TELEPORT;
+                return true;
+            }
+            if (pohPoolUsed && isHealthAndPrayerRestored()) {
+                bankingStep = BankingStep.POH_JEWELLERY_BOX;
+                return true;
+            }
+            status = "Restoring at ornate rejuvenation pool";
+            if (!Rs2GameObject.interact(29241, "Drink")) {
+                status = "Ornate rejuvenation pool not found — retrying";
+                bankingRetryAt = now + 1_000;
+                return true;
+            }
+            pohPoolUsed = true;
+            bankingRetryAt = now + 1_200;
+            return true;
+        }
+
+        if (bankingStep == BankingStep.POH_JEWELLERY_BOX) {
+            if (!PohTeleports.isInHouse()) {
+                bankingStep = BankingStep.BANK;
+                bankingRetryAt = now + 1_500;
+                return true;
+            }
+            JewelleryLocationEnum destination = config.pohJewelleryDestination();
+            status = "Using jewellery box to " + destination.getDestination();
+            if (!PohTeleports.useJewelleryBox(destination)) {
+                status = "Jewellery box teleport unavailable — retrying";
+                bankingRetryAt = now + 1_000;
+                return true;
+            }
+            bankingStep = BankingStep.BANK;
+            bankingRetryAt = now + 2_000;
+            return true;
+        }
+
+        if (bankingStep == BankingStep.RETURN_POH_TELEPORT) {
+            if (PohTeleports.isInHouse()) {
+                bankingStep = BankingStep.RETURN_POH_FAIRY_RING;
+                return true;
+            }
+            String teleItem = config.teleportItem();
+            if (teleItem.isEmpty() || !Rs2Inventory.hasItem(teleItem)) {
+                failSafe("Fairy-ring return requires the configured POH teleport item in the setup");
+                return true;
+            }
+            status = "Returning to POH for fairy ring";
+            if (!interactWithTeleportItem(teleItem)) {
+                status = "Unable to use POH teleport — retrying";
+                bankingRetryAt = now + 1_000;
+                return true;
+            }
+            bankingRetryAt = now + 4_000;
+            return true;
+        }
+
+        if (bankingStep == BankingStep.RETURN_POH_FAIRY_RING) {
+            if (!PohTeleports.isInHouse()) {
+                PlayerSnapshot currentPlayer = readPlayer();
+                if (currentPlayer != null
+                        && currentPlayer.getWorldLocation().distanceTo(BKR_FAIRY_RING) <= 3) {
+                    finishBankingTrip();
+                    return false;
+                }
+                bankingStep = BankingStep.RETURN_POH_TELEPORT;
+                return true;
+            }
+            status = "Using POH fairy ring to BKR";
+            if (!Rs2Walker.usePohFairyRing("BKR", BKR_FAIRY_RING)) {
+                status = "Unable to use POH fairy ring BKR — check ring access and staff";
+                bankingRetryAt = now + 1_000;
+                return true;
+            }
+            finishBankingTrip();
+            return false;
+        }
+
+        if (!Rs2Bank.isNearBank(12)) {
+            status = "Walking to nearest bank";
+            Rs2Bank.walkToBank();
+            bankingRetryAt = now + 2_000;
+            return true;
+        }
+
+        status = "Loading " + setup.getName() + " equipment";
+        if (!inventorySetupLoader.loadEquipment()) {
+            status = "Unable to load setup equipment";
+            bankingRetryAt = now + 1_000;
+            return true;
+        }
+        status = "Loading " + setup.getName() + " inventory";
+        if (!inventorySetupLoader.loadInventory()) {
+            status = "Unable to load setup inventory";
+            bankingRetryAt = now + 1_000;
+            return true;
+        }
+
+        Rs2Bank.closeBank();
+        if (config.usePohBanking() && config.returnViaPohFairyRing()) {
+            bankingStep = BankingStep.RETURN_POH_TELEPORT;
+            bankingRetryAt = now + 1_000;
+            status = "Restocked — returning to POH fairy ring";
+            return true;
+        }
+        finishBankingTrip();
+        return false;
+    }
+
+    private void finishBankingTrip() {
+        bankingRequired = false;
+        bankingRetryAt = 0;
+        pohPoolUsed = false;
+        bankingStep = null;
+        killCount = 0;
+        state = AraxxorState.IDLE;
+        status = "Restocked — travelling to Araxxor";
+    }
+
+    private boolean interactWithTeleportItem(String itemName) {
+        return Rs2Inventory.interact(itemName, "break")
+                || Rs2Inventory.interact(itemName, "rub")
+                || Rs2Inventory.interact(itemName, "teleport");
+    }
+
+    private boolean isHealthAndPrayerRestored() {
+        return readClient(() -> Microbot.getClient().getBoostedSkillLevel(Skill.HITPOINTS)
+                >= Microbot.getClient().getRealSkillLevel(Skill.HITPOINTS)
+                && Microbot.getClient().getBoostedSkillLevel(Skill.PRAYER)
+                >= Microbot.getClient().getRealSkillLevel(Skill.PRAYER));
     }
 
     private void failSafe(String message) {

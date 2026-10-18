@@ -3165,6 +3165,19 @@ final class Rs2WalkerTransports {
         return true;
     }
 
+    static boolean usePohFairyRing(String code, WorldPoint destination) {
+        if (!PohTeleports.isInHouse() || destination == null || code == null
+                || !code.matches("[A-Z]{3}")) {
+            return false;
+        }
+        WorldPoint origin = Rs2Player.getWorldLocation();
+        if (origin == null) return false;
+        Transport transport = new Transport(origin, destination, code,
+                TransportType.FAIRY_RING, true, 5);
+        return handleFairyRing(transport)
+                && isPlayerWithinChebyshevInclusive(destination, OFFSET);
+    }
+
     /**
      * Rotates a fairy ring slot to the desired rotation value.
      * Calculates the most efficient rotation direction (clockwise or anticlockwise)

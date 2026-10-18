@@ -7388,6 +7388,10 @@ public class Rs2Walker {
         return getTransportsForDestination(destination, useBankItems, TransportType.TELEPORTATION_ITEM);
     }
 
+    public static boolean usePohFairyRing(String code, WorldPoint destination) {
+        return Rs2WalkerTransports.usePohFairyRing(code, destination);
+    }
+
 	/**
 	 * Planner-independent counterpart to {@link #getTransportsForDestination(WorldPoint, boolean)}.
 	 * New banking and execution code must use this exact selected-edge view.

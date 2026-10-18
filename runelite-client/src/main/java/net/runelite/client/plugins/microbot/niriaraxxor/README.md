@@ -29,28 +29,11 @@ When a ballista is configured, the script equips the best supported javelin avai
 
 ## Banking and restocking
 
-### Current behavior
+Enable **Bank between trips** and select an **Inventory setup** to automate restocking. The script checks the selected setup before travelling, walks to the nearest bank when needed, restores its equipment and inventory, and resumes after planned or low-supply teleports.
 
-Banking is not currently automated. The script can begin at a bank and web-walk toward Araxxor, but it expects the equipment and inventory to be prepared before it starts. It does not yet:
+Create the setup with the Inventory Setups plugin while wearing the complete combat equipment and carrying the desired supplies, switches, ammunition, teleport, and optional thrall items. Stack comparison and fuzzy matching settings from the setup are honored by the shared loader.
 
-- open a bank;
-- deposit loot;
-- withdraw food, potions, ammunition, runes, or equipment;
-- restore a saved inventory layout;
-- resume automatically after teleporting at the end of a trip.
-
-The `BANKING` state in the source is reserved for future restocking support and should not be interpreted as an active feature.
-
-### Manual bank workflow
-
-1. Equip the normal combat armour and primary weapon setup.
-2. Withdraw the configured switch/spec weapons and matching ammunition.
-3. Withdraw potions, food, the configured teleport item, and any optional thrall supplies.
-4. Confirm every configured item name matches the in-game item name.
-5. Close the bank before starting the script.
-6. Start the script at the bank only when **Travel to Araxxor** is enabled; otherwise begin at the cave, lair, or arena.
-
-After a planned trip or low-supply exit, bank and rebuild the inventory manually before restarting.
+If automatic banking is disabled, the script retains the manual workflow and stops after teleporting. A missing setup while banking is enabled stops the script with an explanatory status.
 
 ## Inventory setup
 

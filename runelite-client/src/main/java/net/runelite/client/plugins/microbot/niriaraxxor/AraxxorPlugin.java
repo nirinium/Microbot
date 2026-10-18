@@ -55,7 +55,7 @@ import java.util.WeakHashMap;
 @Slf4j
 public class AraxxorPlugin extends Plugin {
 
-    public static final String VERSION = "1.0.47";
+    public static final String VERSION = "1.0.55";
 
     private int lastRangedExperience;
     private int lastHitpointsExperience;
