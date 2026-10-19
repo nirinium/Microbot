@@ -13,10 +13,13 @@ public final class PohPresence {
         if (!Rs2Player.IsInInstance()) {
             return false;
         }
-        // The player's mapped world tile is unreliable inside a house instance.
+        // The player's mapped world tile is unreliable inside a house instance. Some
+        // generated layouts do not expose the exit portal through the cache immediately
+        // (or at all while another room is the active scene), so built POH transport
+        // objects are also direct evidence that this instance is a player-owned house.
         return Microbot.getRs2TileObjectCache()
                 .query()
-                .withId(ObjectID.POH_EXIT_PORTAL)
+                .withIds(ObjectID.POH_EXIT_PORTAL, ObjectID.POH_FAIRY_RING, ObjectID.POH_SPIRIT_RING)
                 .nearest() != null;
     }
 }

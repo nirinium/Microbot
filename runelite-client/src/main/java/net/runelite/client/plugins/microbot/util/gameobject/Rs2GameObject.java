@@ -1794,6 +1794,25 @@ public class Rs2GameObject {
             WorldPoint objectLocation = object.getWorldLocation();
             if (objectLocation == null) return false;
             Microbot.cantReachTargetRetries++;
+
+            // A loaded object inside an instance is already represented in scene-local
+            // coordinates, while getWorldLocation() can be its template coordinate. Feeding
+            // that template point to the global web walker produces an unrelated overworld
+            // route (most visibly for POH fairy rings). Approach the object in the loaded
+            // scene instead, then let the caller retry the interaction on its next pass.
+            LocalPoint recoveryObjectLocal = object.getLocalLocation();
+            if (Microbot.getClient().isInInstancedRegion()
+                    && object instanceof GameObject
+                    && recoveryObjectLocal != null
+                    && recoveryObjectLocal.isInScene()) {
+                Microbot.log("[Interact] can't-reach recovery: approaching instanced object "
+                        + object.getId() + " locally (attempt " + Microbot.cantReachTargetRetries + ")");
+                Rs2Walker.walkNextToInstance((GameObject) object);
+                Microbot.cantReachTarget = false;
+                Microbot.cantReachTargetRetries = 0;
+                return false;
+            }
+
             Microbot.log("[Interact] can't-reach recovery: walking to object " + object.getId()
                     + " at " + objectLocation + " (attempt " + Microbot.cantReachTargetRetries + ")");
             if (CantReachTargetRecovery.walkTo(objectLocation, 2)) {

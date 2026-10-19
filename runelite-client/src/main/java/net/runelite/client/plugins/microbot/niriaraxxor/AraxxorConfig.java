@@ -22,6 +22,22 @@ import net.runelite.client.plugins.microbot.util.magic.thralls.ThrallType;
 )
 public interface AraxxorConfig extends Config {
 
+    enum ReturnTravelMethod {
+        SPIDER_CAVE_TELEPORT("Spider cave teleport"),
+        POH_FAIRY_RING_ALQ("POH fairy ring (ALQ)");
+
+        private final String label;
+
+        ReturnTravelMethod(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
     String GROUP = "niriaraxxor";
 
     // ── Sections ────────────────────────────────────────
@@ -380,10 +396,21 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "recoverAfterDeath",
+            name = "Recover after death",
+            description = "Return to the Araxxor entrance, reclaim the gravestone, restore gear, and resume",
+            position = 7,
+            section = safetySection
+    )
+    default boolean recoverAfterDeath() {
+        return true;
+    }
+
+    @ConfigItem(
             keyName = "startingTile",
             name = "Starting tile",
             description = "Stable instance-template tile as x,y,plane; use Capture start tile while standing in the arena",
-            position = 7,
+            position = 8,
             section = safetySection
     )
     default String startingTile() {
@@ -394,7 +421,7 @@ public interface AraxxorConfig extends Config {
             keyName = "captureStartingTile",
             name = "Capture start tile",
             description = "Save your current arena tile as the reusable starting tile",
-            position = 8,
+            position = 9,
             section = safetySection
     )
     default ConfigButton captureStartingTile() {
@@ -405,7 +432,7 @@ public interface AraxxorConfig extends Config {
             keyName = "startingTileRadius",
             name = "Starting tile radius",
             description = "Prefer staying within this many tiles of the captured starting tile during combat",
-            position = 9,
+            position = 10,
             section = safetySection
     )
     @Range(min = 0, max = 6)
@@ -417,7 +444,7 @@ public interface AraxxorConfig extends Config {
             keyName = "stayNearArenaCenter",
             name = "Stay near arena center",
             description = "Use safe weapon-cooldown ticks to move back toward the arena center",
-            position = 10,
+            position = 11,
             section = safetySection
     )
     default boolean stayNearArenaCenter() {
@@ -541,14 +568,14 @@ public interface AraxxorConfig extends Config {
     }
 
     @ConfigItem(
-            keyName = "returnViaPohFairyRing",
-            name = "Return via POH fairy ring",
-            description = "After banking, teleport home and use fairy ring BKR before web-walking to Araxxor; requires fairy-ring access and a staff unless Lumbridge Elite is complete",
+            keyName = "returnTravelMethod",
+            name = "Return route",
+            description = "Choose a direct Spider cave teleport or teleport home and use POH fairy ring ALQ",
             position = 4,
             section = bankingSection
     )
-    default boolean returnViaPohFairyRing() {
-        return true;
+    default ReturnTravelMethod returnTravelMethod() {
+        return ReturnTravelMethod.SPIDER_CAVE_TELEPORT;
     }
 
     @ConfigItem(

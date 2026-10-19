@@ -769,6 +769,114 @@ public class Rs2InventorySetup {
     }
 
 	/**
+	 * Loads equipment in two phases: withdraw every missing equipment item first, then wear the
+	 * complete set. This is useful for scripts that want equipment and inventory supplies loaded
+	 * as distinct bank actions instead of alternating withdraw and wear for every slot.
+	 *
+	 * @return true if the equipment matches the setup after loading, false otherwise
+	 */
+	public boolean loadEquipmentBatched() {
+		if (inventorySetup == null) {
+			return false;
+		}
+
+		if (doesEquipmentMatch() && Rs2Inventory.isEmpty()) {
+			return true;
+		}
+
+		boolean bankWasOpen = Rs2Bank.isOpen();
+		int bankEpochBeforeOpen = Rs2Bank.getBankLiveEpoch();
+		Rs2Bank.openBank();
+		if (!Rs2Bank.isOpen()) {
+			return false;
+		}
+		if (!Rs2Bank.verifyBankMirrorAfterOpen(bankWasOpen, bankEpochBeforeOpen)) {
+			logSetup(Level.WARN, "bank mirror not ready after open (epoch before=%d after=%d) — abort batched equipment load",
+					bankEpochBeforeOpen, Rs2Bank.getBankLiveEpoch());
+			return false;
+		}
+
+		// Start with a clear backpack so the whole equipment set can be withdrawn before it is worn.
+		if (!Rs2Inventory.isEmpty()) {
+			int epochBeforeDeposit = Rs2Bank.getBankLiveEpoch();
+			if (!Rs2Bank.depositAll()) {
+				logSetup(Level.WARN, "depositAll failed while preparing batched equipment load");
+				return false;
+			}
+			if (!Rs2Bank.syncBankInventoryAfterChange(epochBeforeDeposit)) {
+				logSetup(Level.WARN, "bank sync timeout after depositAll while preparing batched equipment load");
+				return false;
+			}
+		}
+
+		boolean hasExtraGearEquipped = Rs2Equipment.isWearing(equip ->
+				inventorySetup.getEquipment().stream().noneMatch(setup -> setup.isFuzzy()
+						? equip.getName().toLowerCase().contains(setup.getName().toLowerCase())
+						: equip.getName().equalsIgnoreCase(setup.getName())));
+		if (hasExtraGearEquipped) {
+			logSetup(Level.DEBUG, "extra gear not in setup — deposit equipment before batched load");
+			Rs2Bank.depositEquipment();
+			if (!sleepUntil(() -> Rs2Equipment.items().stream().noneMatch(Objects::nonNull))) {
+				return false;
+			}
+		}
+
+		// Phase one: put the complete missing equipment set into the backpack.
+		for (InventorySetupsItem item : inventorySetup.getEquipment()) {
+			if (isMainSchedulerCancelled()) {
+				return false;
+			}
+			if (InventorySetupsItem.itemIsDummy(item) || Rs2Equipment.isWearing(item.getName())) {
+				continue;
+			}
+
+			String lowerCaseName = item.getName().toLowerCase();
+			boolean isFuzzy = item.isFuzzy();
+			Object identifier = isFuzzy ? lowerCaseName : item.getId();
+			boolean inBank = isFuzzy
+					? Rs2Bank.hasItem((String) identifier) || Rs2Bank.hasBankItem((String) identifier, item.getQuantity(), false)
+					: Rs2Bank.hasItem((int) identifier) || Rs2Bank.hasBankItem((int) identifier, item.getQuantity());
+			if (!inBank && !isFuzzy) {
+				inBank = Rs2Bank.hasBankItem(lowerCaseName, item.getQuantity(), false);
+			}
+			if (!inBank) {
+				logSetup(Level.WARN, "missing gear %s during batched load | bank=%d | need=%d",
+						item.getName(), bankQtyForPresetRow(item, lowerCaseName, isFuzzy), item.getQuantity());
+				return false;
+			}
+
+			withdrawItem(item, item.getQuantity(), false);
+			boolean withdrawn = isFuzzy
+					? Rs2Inventory.hasItem((String) identifier)
+					: Rs2Inventory.hasItem((int) identifier);
+			if (!withdrawn) {
+				logSetup(Level.WARN, "failed to withdraw gear %s during batched load", item.getName());
+				return false;
+			}
+		}
+
+		// Phase two: wear the set only after every required bank withdrawal has completed.
+		for (InventorySetupsItem item : inventorySetup.getEquipment()) {
+			if (isMainSchedulerCancelled()) {
+				return false;
+			}
+			if (InventorySetupsItem.itemIsDummy(item) || Rs2Equipment.isWearing(item.getName())) {
+				continue;
+			}
+
+			boolean wearStarted = item.isFuzzy()
+					? Rs2Bank.wearItem(item.getName().toLowerCase())
+					: Rs2Bank.wearItem(item.getId());
+			if (!wearStarted || !sleepUntil(() -> Rs2Equipment.isWearing(item.getName()))) {
+				logSetup(Level.WARN, "failed to wear gear %s during batched load", item.getName());
+				return false;
+			}
+		}
+
+		return doesEquipmentMatch();
+	}
+
+	/**
 	 * @param skipIfAlreadyMatching when {@code true}, skip bank if equipment matches and inventory needs no deposit cleanup.
 	 */
 	public boolean loadEquipment(boolean skipIfAlreadyMatching) {

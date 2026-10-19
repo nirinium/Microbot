@@ -25,6 +25,7 @@ import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
 import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
+import net.runelite.client.plugins.microbot.util.death.Rs2Death;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
 import net.runelite.client.plugins.microbot.util.equipment.JewelleryLocationEnum;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
@@ -113,14 +114,16 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private static final int VENOM_PUDDLE_3 = ObjectID1.ARAXXOR_VENOM_PUDDLE03;   // 54257
     private static final int ARAXXOR_MAX_HITPOINTS = 1020;
     private static final int ACIDIC_IGNORE_BELOW_HITPOINTS = 100;
-    private static final int RUPTURA_FLEE_DISTANCE = 3;
-    private static final int ENRAGED_RUPTURA_FLEE_DISTANCE = 4;
+    private static final int RUPTURA_FLEE_DISTANCE = 2;
+    private static final int ENRAGED_RUPTURA_FLEE_DISTANCE = 3;
     /** Keep collision-map work small enough that a script iteration cannot stall the client thread. */
     private static final int MAX_TRAVERSABILITY_CANDIDATES = 24;
     private static final int MAX_TRAVERSABILITY_STEPS = 16;
     private static final WorldPoint SPIDER_CAVE_ENTRANCE = new WorldPoint(3658, 3409, 0);
     private static final WorldPoint ARAXXOR_LAIR_APPROACH = new WorldPoint(3658, 9816, 0);
-    private static final WorldPoint BKR_FAIRY_RING = new WorldPoint(3469, 3431, 0);
+    private static final WorldPoint ALQ_FAIRY_RING = new WorldPoint(3598, 3496, 0);
+    private static final WorldPoint GRAND_EXCHANGE_BANK_AREA = new WorldPoint(3164, 3487, 0);
+    private static final String SPIDER_CAVE_TELEPORT = "Spider cave teleport";
 
     private static final String[] BALLISTA_JAVELINS = {
             "Dragon javelin", "Amethyst javelin", "Rune javelin", "Adamant javelin",
@@ -166,8 +169,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private volatile int acidDripPhase = 0;
     private int acidDripCornerIndex = -1;
     private int acidDripCycles;
-    private boolean acidDripRunStateCaptured;
-    private boolean restoreRunAfterAcidDrip;
 
     // Enrage cleave tracking
     @Getter
@@ -221,13 +222,20 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private Rs2InventorySetup inventorySetupLoader;
     private String selectedInventorySetupName;
     private boolean bankingRequired;
+    private boolean bankEquipmentLoaded;
+    private boolean initialSupplyCheckComplete;
     private long bankingRetryAt;
-    private boolean pohPoolUsed;
+    private boolean bankingLoadInProgress;
+    private int bankingLoadAttempts;
     private enum BankingStep {
         POH_TELEPORT, POH_RESTORE, POH_JEWELLERY_BOX, BANK,
-        RETURN_POH_TELEPORT, RETURN_POH_FAIRY_RING
+        RETURN_SPIDER_CAVE_TELEPORT, RETURN_POH_TELEPORT, RETURN_POH_FAIRY_RING
     }
     private BankingStep bankingStep;
+    private volatile boolean deathRecoveryActive;
+    private boolean graveRecovered;
+    private long deathRecoveryRetryAt;
+    private int[] deathEquipmentIds = new int[0];
 
     enum EncounterPhase { WAITING, ACTIVE, POST_FIGHT, ERROR }
     private volatile boolean postFight;
@@ -251,6 +259,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private long enrageAttackResumeAt;
     private long corpseRetryAt;
     private long entryRetryAt;
+    private boolean lairEntryPending;
+    private long lairEntryIssuedAt;
     private long lootQuietSince;
     private long lootCompletionNotBefore;
     private boolean lootCollectionComplete = true;
@@ -698,6 +708,19 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         }
 
         this.config = config;
+        deathRecoveryActive = false;
+        graveRecovered = false;
+        deathRecoveryRetryAt = 0;
+        deathEquipmentIds = new int[0];
+        bankingRequired = false;
+        bankEquipmentLoaded = false;
+        initialSupplyCheckComplete = false;
+        bankingStep = null;
+        bankingRetryAt = 0;
+        bankingLoadInProgress = false;
+        bankingLoadAttempts = 0;
+        lairEntryPending = false;
+        lairEntryIssuedAt = 0;
         resetFightState();
         deathProcessed = false;
         postFight = false;
@@ -808,7 +831,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
 
         // Detect acid special attacks
         if (animationId == ANIM_ACID_LEAK) {
-            if (!acidDripActive) acidDripRunStateCaptured = false;
             acidDripActive = true;
             acidDripStartTick = diagnosticTick;
             acidDripPhase = 0; // start with step-under
@@ -854,7 +876,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
 
     public void onAcidDripLanded(int tick) {
         if (!acidDripActive) {
-            acidDripRunStateCaptured = false;
             acidDripPhase = 0;
             acidDripCornerIndex = -1;
             acidDripCycles = 0;
@@ -1020,6 +1041,23 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         log("Araxxor killed! Total: " + killCount);
     }
 
+    /** Called from the client-thread death event; recovery itself runs on the script worker. */
+    public synchronized void onPlayerDeath() {
+        deathEquipmentIds = Rs2Equipment.items().stream()
+                .mapToInt(Rs2ItemModel::getId)
+                .filter(id -> id > 0)
+                .toArray();
+        deathRecoveryActive = true;
+        graveRecovered = false;
+        deathRecoveryRetryAt = 0;
+        postFight = false;
+        lootCollectionComplete = true;
+        resetFightState();
+        state = AraxxorState.DEAD;
+        status = "Player died — waiting to respawn";
+        traceEvent("PLAYER_DEATH", "recovery=" + config.recoverAfterDeath());
+    }
+
     @Override
     public void shutdown() {
         // Cancel/interrupt the worker first. The stop control must never wait for
@@ -1069,11 +1107,46 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         long now = System.currentTimeMillis();
         Rs2NpcModel araxxor = loopBoss;
 
-        if (config.useBanking() && araxxor == null
-                && (PohTeleports.isInHouse()
-                    || !readClient(() -> Microbot.getClient().isInInstancedRegion()))
-                && handleBanking()) {
+        if (deathRecoveryActive) {
+            handleDeathRecovery(player, now);
             return;
+        }
+
+        if (config.useBanking() && araxxor == null
+                && (bankingRequired
+                    || PohTeleports.isInHouse()
+                    || !readClient(() -> Microbot.getClient().isInInstancedRegion()))) {
+            // Validate once before beginning any banking transaction. A complete
+            // setup should proceed directly to Araxxor instead of consuming a POH
+            // tablet, visiting a bank, or reloading equipment unnecessarily.
+            if (!bankingRequired && !initialSupplyCheckComplete) {
+                initialSupplyCheckComplete = true;
+                if (doesSelectedSetupMatch()) {
+                    bankingRequired = false;
+                    bankingStep = null;
+                    bankEquipmentLoaded = false;
+                    if (Rs2Bank.isOpen() && !Rs2Bank.closeBank()) {
+                        status = "Setup ready — waiting for bank to close";
+                        return;
+                    }
+                    status = "Inventory setup ready — travelling to Araxxor";
+                    traceEvent("SUPPLY_CHECK", "setupComplete=true bankingSkipped=true");
+                } else {
+                    bankingRequired = true;
+                    traceEvent("SUPPLY_CHECK", "setupComplete=false bankingRequired=true");
+                }
+            }
+            if (bankingRequired && handleBanking()) return;
+        }
+
+        // Run is the encounter default. Acid Drip is the sole mechanic that
+        // deliberately switches to walking so its one-tile rhythm stays precise.
+        // Do not return after toggling: the same loop may still need to pray,
+        // dodge, or attack immediately.
+        if (!acidDripActive && (araxxor != null || isInsideAraxxorLair(player))
+                && !Rs2Player.isRunEnabled()) {
+            Rs2Player.toggleRunEnergy(true);
+            traceEvent("RUN_MODE", "enabled outside acid drip");
         }
 
         if (!acidCannonIncoming && predictedAcidCannonTick >= 0
@@ -1108,6 +1181,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
             }
             if (handleStartingTile(player)) return;
+            lairEntryPending = false;
+            lairEntryIssuedAt = 0;
         }
 
         // Dodge flags are raised by client-thread events. Process them before
@@ -1117,6 +1192,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             if (dodgeCleave(player)) {
                 cleaveIncoming = false;
                 clearCleaveTiles();
+                queueImmediateEnrageAttack(araxxor);
             }
             return;
         }
@@ -1132,8 +1208,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         // ── 1. HIGHEST PRIORITY: flee ruptura before it reaches us ──
         // Ruptura walks toward the player and explodes once on the same tile for 1 tick.
         // The explosion hits for up to 80 damage at melee range. At 3+ tiles it's only ~7.
-        // We flee at distance ≤ 2 (one tile BEFORE it can reach us) to guarantee we're
-        // gone before it arrives on our tile and triggers the explosion.
+        // Wait until distance ≤ 2 so it commits to the player's tile, then run before
+        // the following game tick. Enrage keeps one extra tile of safety margin.
         Rs2NpcModel rupturaUrgent = getNpc(RUPTURA_ID);
         if (rupturaUrgent != null && !isDead(rupturaUrgent)) {
             WorldPoint ruptLoc = rupturaUrgent.getWorldLocation();
@@ -1238,15 +1314,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             log("Arena center set to " + arenaCenter);
         }
 
-        // The instance spawn is already inside Araxxor's melee reach. Until the
-        // configured start tile is reached, entry movement owns the loop and must
-        // keep Protect from Melee active; projectile inference must not switch it.
-        if (!startingTileReady) {
-            if (config.protectFromMelee()) {
-                Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
-            }
-            if (handleStartingTile(player)) return;
-        }
         if (fightStartedAt == 0) fightStartedAt = System.currentTimeMillis();
 
         // Protection must be active before gear, potion, minion, or attack actions.
@@ -1271,8 +1338,9 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             drinkPotions();
         }
 
-        // ── 8. Prayer management ──
-        managePrayers(player, araxxor);
+        // Weapon switches mark prayer state dirty. Only repeat the prayer pass
+        // when something since the safety pass above actually changed it.
+        if (prayerDirty) managePrayers(player, araxxor);
 
         // ── 8.5. Thrall summoning ──
         if (config.useThralls() && now >= nextThrallCheckAt) {
@@ -1585,8 +1653,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
      * At 4+ tiles the explosion only deals ~7 damage.
      * <p>
      * Strategy: keep attacking Araxxor while the ruptura approaches. The moment it
-     * reaches distance ≤ 3, run 5 tiles away and keep re-fleeing every 100ms if it closes.
-     * This gives multiple game ticks of margin so we're safely distant when it detonates.
+     * reaches distance ≤ 2, run away after it has committed to the trigger tile.
+     * Enrage starts at distance ≤ 3 because overlapping hazards reduce the escape margin.
      * <p>
      * Lure mode: position so the ruptura paths through/under Araxxor, dealing
      * 64-80 damage to the boss when it explodes.
@@ -1598,8 +1666,10 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         WorldPoint playerLoc = player.getWorldLocation();
         int distToRuptura = playerLoc.distanceTo(rupturaLoc);
 
-        // ── Close enough to worry? RUN 5 tiles NOW (flee at ≤3 for extra margin) ──
-        if (distToRuptura <= 3) {
+        // Use the same threshold as the urgent path so this fallback cannot flee
+        // a tick early and prevent the ruptura from committing to its trigger tile.
+        int fleeDistance = enraged ? ENRAGED_RUPTURA_FLEE_DISTANCE : RUPTURA_FLEE_DISTANCE;
+        if (distToRuptura <= fleeDistance) {
             status = "FLEE RUPTURA! Close! (" + distToRuptura + " tiles)";
             fleeFromRuptura(player, rupturaLoc);
 
@@ -1943,7 +2013,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         // first; all routine enrage movement is confined to weapon cooldown.
         if (diagnosticTick >= nextAttackReadyTick) {
             if (!isTarget(araxxor)) attackNpc(araxxor);
-            tickSleep();
             return;
         }
         if (!routineMovementAllowed()) return;
@@ -1989,8 +2058,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             if (tickSleep()) return; // dodge takes priority, but attack is already queued
         }
 
-        tickSleep();
-
         drinkPrayerPotion();
     }
 
@@ -2002,7 +2069,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     private void handleEnrageFightRanged(PlayerSnapshot player, Rs2NpcModel araxxor) {
         state = AraxxorState.FIGHTING;
 
-        if (cleaveIncoming || diagnosticTick <= enrageRecoveryThroughTick
+        if (cleaveIncoming || diagnosticTick < enrageRecoveryThroughTick
                 || System.currentTimeMillis() < enrageAttackResumeAt) {
             status = "Cleave recovery — move/eat before attack";
             return;
@@ -2021,7 +2088,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             if (forceClick || !isTarget(araxxor)) {
                 attackNpc(araxxor, forceClick);
             }
-            tickSleep();
             return;
         }
 
@@ -2033,9 +2099,25 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             attackNpc(araxxor);
         }
 
-        tickSleep();
-
         drinkPrayerPotion();
+    }
+
+    /**
+     * A confirmed ranged cleave escape has already cleared the movement transaction.
+     * When the weapon is ready and the configured recovery is zero, queue the attack
+     * in this same script iteration rather than waiting for another game tick.
+     */
+    private void queueImmediateEnrageAttack(Rs2NpcModel araxxor) {
+        if (!enraged || config.combatStyle() != AraxxorConfig.CombatStyle.RANGED
+                || config.enragePostDodgeDelayTicks() != 0
+                || araxxor == null || isDead(araxxor)
+                || diagnosticTick < nextAttackReadyTick) {
+            return;
+        }
+        status = "Cleave dodged — immediately attacking";
+        boolean clicked = attackNpc(araxxor, true);
+        traceEvent("ENRAGE_DODGE_ATTACK", "sameIteration=true clicked=" + clicked
+                + " readyTick=" + nextAttackReadyTick);
     }
 
     /**
@@ -2524,10 +2606,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             return;
         }
 
-        if (!acidDripRunStateCaptured) {
-            restoreRunAfterAcidDrip = Rs2Player.isRunEnabled();
-            acidDripRunStateCaptured = true;
-        }
         if (Rs2Player.isRunEnabled()) {
             Rs2Player.toggleRunEnergy(false);
             status = "Acid drip — switching to walk";
@@ -2596,15 +2674,13 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     }
 
     private void finishAcidDrip() {
-        if (acidDripRunStateCaptured && restoreRunAfterAcidDrip && !Rs2Player.isRunEnabled()) {
+        if (!Rs2Player.isRunEnabled()) {
             Rs2Player.toggleRunEnergy(true);
         }
         acidDripActive = false;
         acidDripPhase = 0;
         acidDripCornerIndex = -1;
         acidDripCycles = 0;
-        acidDripRunStateCaptured = false;
-        restoreRunAfterAcidDrip = false;
     }
 
     private int nearestSafeAcidDripCorner(WorldPoint playerLoc, WorldPoint[] underCorners,
@@ -3304,6 +3380,47 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             emergencyTeleport();
             return;
         }
+        PlayerSnapshot player = readPlayer();
+        if (isInsideAraxxorLair(player)) {
+            // This remains true between kills even though the entry transaction has
+            // completed. Do not infer that a temporarily absent boss means we left
+            // the arena: the next Araxxor can spawn and attack during that gap.
+            state = AraxxorState.ENTERING_LAIR;
+            if (config.protectFromMelee()) {
+                Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
+            }
+            if (handleStartingTile(player)) {
+                return;
+            }
+            status = "Inside lair — awaiting Araxxor";
+            return;
+        }
+        if (lairEntryPending) {
+            boolean insideInstance = readClient(() -> Microbot.getClient().isInInstancedRegion());
+            if (!insideInstance) {
+                // The scene and player caches briefly expose the tunnel-side state
+                // while the instance is loading. Retain ownership here so that
+                // IDLE cannot launch a new surface web-walk during that transition.
+                if (now - lairEntryIssuedAt < 12_000) {
+                    state = AraxxorState.ENTERING_LAIR;
+                    status = "Entering Araxxor lair — awaiting arena";
+                    return;
+                }
+                traceEvent("LAIR_ENTRY_TIMEOUT", "waitedMs=" + (now - lairEntryIssuedAt));
+                lairEntryPending = false;
+                lairEntryIssuedAt = 0;
+            } else {
+                state = AraxxorState.ENTERING_LAIR;
+                if (config.protectFromMelee()) {
+                    Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
+                }
+                if (player != null && handleStartingTile(player)) {
+                    return;
+                }
+                status = "Inside lair — awaiting Araxxor";
+                return;
+            }
+        }
         state = AraxxorState.IDLE;
         status = "Waiting for Araxxor";
         if (config.enterLair() && now >= entryRetryAt) {
@@ -3339,6 +3456,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                     // object's unadjusted centre and could visibly click without
                     // invoking the tunnel action.
                     boolean clicked = action.isEmpty() ? entrance.click() : entrance.click(action);
+                    markLairEntryPending(clicked, now);
                     traceEvent("LAIR_ENTRY", "id=54161 action="
                             + (action.isEmpty() ? "first-option" : action) + " dispatched=" + clicked
                             + " auto=" + config.autoEnterAndFight());
@@ -3361,7 +3479,9 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 if (!action.isEmpty()) {
                     state = AraxxorState.ENTERING_LAIR;
                     status = "Entering lair — awaiting instance";
-                    if (!entrance.click(action)) {
+                    boolean clicked = entrance.click(action);
+                    markLairEntryPending(clicked, now);
+                    if (!clicked) {
                         status = "Lair door click failed — retrying";
                     }
                     entryRetryAt = now + 5000;
@@ -3371,13 +3491,46 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 // composition even though its first menu option enters the lair.
                 state = AraxxorState.ENTERING_LAIR;
                 status = "Entering lair via first option";
-                if (!entrance.click()) {
+                boolean clicked = entrance.click();
+                markLairEntryPending(clicked, now);
+                if (!clicked) {
                     status = "Lair first-option click failed — retrying";
                 }
                 traceEvent("LAIR_ENTRY", "id=" + entrance.getId() + " fallbackFirstOption=true");
                 entryRetryAt = now + 5000;
                 return;
             }
+
+            // Never hand an instanced POH position to the overworld web walker. This
+            // can happen when the script starts in a fully supplied house: banking is
+            // correctly skipped, but travel still needs to leave through the POH ring.
+            if (PohTeleports.isInHouse()) {
+                if (config.returnTravelMethod() == AraxxorConfig.ReturnTravelMethod.SPIDER_CAVE_TELEPORT) {
+                    if (!Rs2Inventory.hasItem(SPIDER_CAVE_TELEPORT)) {
+                        status = "Inside POH — selected route requires a Spider cave teleport";
+                        entryRetryAt = System.currentTimeMillis() + 2_000;
+                        return;
+                    }
+                    status = "Using Spider cave teleport";
+                    if (Rs2Inventory.interact(SPIDER_CAVE_TELEPORT, "teleport")) {
+                        entryRetryAt = System.currentTimeMillis() + 4_000;
+                    } else {
+                        status = "Spider cave teleport failed — retrying";
+                        entryRetryAt = System.currentTimeMillis() + 1_000;
+                    }
+                    return;
+                }
+                status = "Using POH fairy ring to ALQ";
+                if (Rs2Walker.usePohFairyRing("ALQ", ALQ_FAIRY_RING)) {
+                    status = "At ALQ — travelling to Araxxor";
+                    entryRetryAt = System.currentTimeMillis() + 250;
+                } else {
+                    status = "Unable to use POH fairy ring ALQ — retrying";
+                    entryRetryAt = System.currentTimeMillis() + 1_000;
+                }
+                return;
+            }
+
             routeToAraxxorEntrance(now);
             return;
         }
@@ -3409,10 +3562,43 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         });
     }
 
+    private void markLairEntryPending(boolean clicked, long now) {
+        if (!clicked) return;
+        lairEntryPending = true;
+        lairEntryIssuedAt = now;
+        resolvedStartingTile = null;
+        startingTileReady = false;
+    }
+
+    private boolean isInsideAraxxorLair(PlayerSnapshot player) {
+        if (player == null || !readClient(() -> Microbot.getClient().isInInstancedRegion())) {
+            return false;
+        }
+        WorldPoint templateLocation = readClient(() -> {
+            var localPlayer = Microbot.getClient().getLocalPlayer();
+            if (localPlayer == null || localPlayer.getLocalLocation() == null) return null;
+            return WorldPoint.fromLocalInstance(Microbot.getClient(), localPlayer.getLocalLocation());
+        });
+        return templateLocation != null && templateLocation.getPlane() == 0
+                && templateLocation.getX() >= 3550 && templateLocation.getX() <= 3750
+                && templateLocation.getY() >= 9700 && templateLocation.getY() <= 9900;
+    }
+
     private void routeToAraxxorEntrance(long now) {
+        if (lairEntryPending) {
+            state = AraxxorState.ENTERING_LAIR;
+            status = "Entering Araxxor lair — awaiting arena";
+            return;
+        }
         PlayerSnapshot player = readPlayer();
         if (player == null) {
             entryRetryAt = now + 2000;
+            return;
+        }
+        if (isInsideAraxxorLair(player)) {
+            state = AraxxorState.ENTERING_LAIR;
+            status = "Inside lair — awaiting Araxxor";
+            traceEvent("WEB_WALK_BLOCKED", "reason=inside-araxxor-lair");
             return;
         }
 
@@ -3464,6 +3650,98 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             entryRetryAt = System.currentTimeMillis() + 3000;
         }
     }
+
+    private void handleDeathRecovery(PlayerSnapshot player, long now) {
+        state = AraxxorState.DEAD;
+        togglePrayers(false);
+
+        if (!config.recoverAfterDeath()) {
+            failSafe("Death recovery is disabled");
+            return;
+        }
+        if (Rs2Death.isDead()) {
+            status = "Player died — waiting to respawn";
+            return;
+        }
+        if (now < deathRecoveryRetryAt) return;
+
+        if (!graveRecovered) {
+            if (!Rs2Death.hasGrave()) {
+                if (Rs2Death.hasGraveExpired()) {
+                    failSafe("Araxxor gravestone expired; items are safe in Death's Office");
+                    return;
+                }
+                status = "Waiting for gravestone to appear";
+                deathRecoveryRetryAt = now + 600;
+                return;
+            }
+
+            if (Rs2Death.getGrave() == null) {
+                status = "Returning to Araxxor gravestone";
+                routeToAraxxorEntrance(now);
+                state = AraxxorState.DEAD;
+                return;
+            }
+
+            status = "Recovering items from Araxxor gravestone";
+            if (!Rs2Death.recoverItems(Integer.MAX_VALUE)) {
+                // A full backpack can leave worn items in the grave when the game's
+                // auto-equip-on-reclaim setting is disabled. Equip any recovered setup
+                // pieces to free slots, then resume the grave on the next iteration.
+                Rs2Death.closeInterfaces();
+                wearRecoveredEquipment();
+                deathRecoveryRetryAt = System.currentTimeMillis() + 600;
+                return;
+            }
+            graveRecovered = true;
+            traceEvent("DEATH_RECOVERY", "graveRecovered=true");
+        }
+
+        if (!wearRecoveredEquipment()) {
+            status = "Restoring recovered equipment";
+            deathRecoveryRetryAt = now + 600;
+            return;
+        }
+
+        deathRecoveryActive = false;
+        graveRecovered = false;
+        deathRecoveryRetryAt = 0;
+        resetFightState();
+        killCount = 0;
+
+        if (config.useBanking()) {
+            bankingRequired = true;
+            bankEquipmentLoaded = false;
+            bankingLoadInProgress = false;
+            bankingLoadAttempts = 0;
+            bankingStep = null;
+            state = AraxxorState.BANKING;
+            status = "Gear recovered — resupplying";
+        } else {
+            state = AraxxorState.IDLE;
+            status = "Gear recovered — returning to Araxxor";
+        }
+    }
+
+    private boolean wearRecoveredEquipment() {
+        InventorySetup setup = config.inventorySetup();
+        if (setup == null) {
+            for (int itemId : deathEquipmentIds) {
+                if (!Rs2Equipment.isWearing(itemId) && Rs2Inventory.hasItem(itemId)) {
+                    Rs2Inventory.wield(itemId);
+                }
+            }
+            return Arrays.stream(deathEquipmentIds)
+                    .allMatch(itemId -> Rs2Equipment.isWearing(itemId) || !Rs2Inventory.hasItem(itemId));
+        }
+        if (inventorySetupLoader == null || !setup.getName().equals(selectedInventorySetupName)) {
+            selectedInventorySetupName = setup.getName();
+            inventorySetupLoader = new Rs2InventorySetup(setup, mainScheduledFuture);
+        }
+        if (inventorySetupLoader.doesEquipmentMatch()) return true;
+        inventorySetupLoader.wearEquipment();
+        return inventorySetupLoader.doesEquipmentMatch();
+    }
     /**
      * Reset all per-fight state flags. Called when transitioning to idle between kills
      * to ensure stale enraged/acid/cleave flags from a previous fight don't carry over.
@@ -3484,8 +3762,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         acidDripPhase = 0;
         acidDripCornerIndex = -1;
         acidDripCycles = 0;
-        acidDripRunStateCaptured = false;
-        restoreRunAfterAcidDrip = false;
         cleaveIncoming = false;
         cleaveDetectedTick = -1000;
         enrageRecoveryThroughTick = -1000;
@@ -3676,6 +3952,8 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
     }
 
     private void emergencyTeleport() {
+        lairEntryPending = false;
+        lairEntryIssuedAt = 0;
         state = AraxxorState.TELEPORTING_AWAY;
         togglePrayers(false);
 
@@ -3697,14 +3975,14 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             || !readClient(() -> Microbot.getClient().isInInstancedRegion()), 5000)) {
             if (config.useBanking()) {
                 bankingRequired = true;
-                pohPoolUsed = false;
-            bankingStep = config.usePohBanking()
-                ? (PohTeleports.isInHouse() ? BankingStep.POH_RESTORE : BankingStep.POH_TELEPORT)
-                : BankingStep.BANK;
+                bankEquipmentLoaded = false;
+                bankingLoadInProgress = false;
+                bankingLoadAttempts = 0;
+                bankingStep = chooseInitialBankingStep();
                 state = AraxxorState.BANKING;
-            status = bankingStep == BankingStep.POH_RESTORE
-                ? "Teleport complete — restoring in POH"
-                : "Teleport complete — heading to bank";
+                status = bankingStep == BankingStep.POH_RESTORE
+                    ? "Teleport complete — restoring in POH"
+                    : "Teleport complete — heading to bank";
             } else {
                 shutdown();
             }
@@ -3719,14 +3997,16 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             failSafe("Banking enabled but no Inventory Setup selected");
             return true;
         }
-        if (inventorySetupLoader == null || !setup.getName().equals(selectedInventorySetupName)) {
-            selectedInventorySetupName = setup.getName();
-            inventorySetupLoader = new Rs2InventorySetup(setup, mainScheduledFuture);
-        }
-        if (!bankingRequired
-                && inventorySetupLoader.doesInventoryMatch()
-                && inventorySetupLoader.doesEquipmentMatch()) {
-            return false;
+        ensureSelectedSetupLoader(setup);
+
+        // Latch the decision before teleporting. Instance/loading transitions can
+        // temporarily expose incomplete inventory caches; they must not cancel an
+        // already-required resupply trip on the next script iteration.
+        if (!bankingRequired) {
+            bankingRequired = true;
+            bankEquipmentLoaded = false;
+            bankingLoadInProgress = false;
+            bankingLoadAttempts = 0;
         }
 
         state = AraxxorState.BANKING;
@@ -3736,13 +4016,26 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             return true;
         }
 
-        if (bankingStep == null) {
-            bankingStep = config.usePohBanking() ? BankingStep.POH_TELEPORT : BankingStep.BANK;
-        } else if (!config.usePohBanking() && !PohTeleports.isInHouse()) {
+        if (bankingLoadInProgress) {
+            // Once loading has begun, no cache miss, config branch, or missing
+            // travel item may redirect the transaction through POH.
+            bankingStep = BankingStep.BANK;
+        } else if (bankingStep == null) {
+            bankingStep = chooseInitialBankingStep();
+        } else if (!config.usePohBanking() && !PohTeleports.isInHouse()
+                && (bankingStep == BankingStep.POH_TELEPORT
+                    || bankingStep == BankingStep.POH_RESTORE
+                    || bankingStep == BankingStep.POH_JEWELLERY_BOX)) {
             bankingStep = BankingStep.BANK;
         }
 
         if (bankingStep == BankingStep.POH_TELEPORT) {
+            if (isNearBankForRouting()) {
+                bankingStep = BankingStep.BANK;
+                status = "Already near a bank — skipping POH and jewellery box";
+                traceEvent("BANK_ROUTE", "nearBank=true pohSkipped=true");
+                return true;
+            }
             if (PohTeleports.isInHouse()) {
                 bankingStep = BankingStep.POH_RESTORE;
                 return true;
@@ -3752,6 +4045,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 failSafe("POH banking requires the configured teleport item");
                 return true;
             }
+            if (!ensureBankClosedForTeleport(now)) return true;
             status = "Teleporting to POH";
             if (!interactWithTeleportItem(teleItem)) {
                 status = "Unable to use POH teleport — retrying";
@@ -3767,8 +4061,9 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 bankingStep = BankingStep.POH_TELEPORT;
                 return true;
             }
-            if (pohPoolUsed && isHealthAndPrayerRestored()) {
+            if (isHealthAndPrayerRestored()) {
                 bankingStep = BankingStep.POH_JEWELLERY_BOX;
+                traceEvent("POH_RESTORE", "alreadyRestored=true poolSkipped=true");
                 return true;
             }
             status = "Restoring at ornate rejuvenation pool";
@@ -3777,7 +4072,6 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 bankingRetryAt = now + 1_000;
                 return true;
             }
-            pohPoolUsed = true;
             bankingRetryAt = now + 1_200;
             return true;
         }
@@ -3800,6 +4094,28 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             return true;
         }
 
+        if (bankingStep == BankingStep.RETURN_SPIDER_CAVE_TELEPORT) {
+            PlayerSnapshot currentPlayer = readPlayer();
+            if (currentPlayer != null
+                    && currentPlayer.getWorldLocation().distanceTo(SPIDER_CAVE_ENTRANCE) <= 12) {
+                finishBankingTrip();
+                return false;
+            }
+            if (!ensureBankClosedForTeleport(now)) return true;
+            if (!Rs2Inventory.hasItem(SPIDER_CAVE_TELEPORT)) {
+                failSafe("Selected return route requires a Spider cave teleport in the setup");
+                return true;
+            }
+            status = "Teleporting directly to Morytania Spider Cave";
+            if (!Rs2Inventory.interact(SPIDER_CAVE_TELEPORT, "teleport")) {
+                status = "Unable to use Spider cave teleport — retrying";
+                bankingRetryAt = now + 1_000;
+                return true;
+            }
+            bankingRetryAt = now + 4_000;
+            return true;
+        }
+
         if (bankingStep == BankingStep.RETURN_POH_TELEPORT) {
             if (PohTeleports.isInHouse()) {
                 bankingStep = BankingStep.RETURN_POH_FAIRY_RING;
@@ -3810,6 +4126,7 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
                 failSafe("Fairy-ring return requires the configured POH teleport item in the setup");
                 return true;
             }
+            if (!ensureBankClosedForTeleport(now)) return true;
             status = "Returning to POH for fairy ring";
             if (!interactWithTeleportItem(teleItem)) {
                 status = "Unable to use POH teleport — retrying";
@@ -3824,16 +4141,16 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             if (!PohTeleports.isInHouse()) {
                 PlayerSnapshot currentPlayer = readPlayer();
                 if (currentPlayer != null
-                        && currentPlayer.getWorldLocation().distanceTo(BKR_FAIRY_RING) <= 3) {
+                        && currentPlayer.getWorldLocation().distanceTo(ALQ_FAIRY_RING) <= 3) {
                     finishBankingTrip();
                     return false;
                 }
                 bankingStep = BankingStep.RETURN_POH_TELEPORT;
                 return true;
             }
-            status = "Using POH fairy ring to BKR";
-            if (!Rs2Walker.usePohFairyRing("BKR", BKR_FAIRY_RING)) {
-                status = "Unable to use POH fairy ring BKR — check ring access and staff";
+            status = "Using POH fairy ring to ALQ";
+            if (!Rs2Walker.usePohFairyRing("ALQ", ALQ_FAIRY_RING)) {
+                status = "Unable to use POH fairy ring ALQ — check ring access and staff";
                 bankingRetryAt = now + 1_000;
                 return true;
             }
@@ -3841,41 +4158,104 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
             return false;
         }
 
-        if (!Rs2Bank.isNearBank(12)) {
+        if (!isNearBankForRouting()) {
             status = "Walking to nearest bank";
             Rs2Bank.walkToBank();
             bankingRetryAt = now + 2_000;
             return true;
         }
 
-        status = "Loading " + setup.getName() + " equipment";
-        if (!inventorySetupLoader.loadEquipment()) {
-            status = "Unable to load setup equipment";
-            bankingRetryAt = now + 1_000;
-            return true;
+        bankingLoadInProgress = true;
+        bankingStep = BankingStep.BANK;
+        if (!bankEquipmentLoaded) {
+            status = "Loading " + setup.getName() + " equipment";
+            if (!inventorySetupLoader.loadEquipmentBatched()) {
+                handleBankLoadFailure("equipment", now);
+                return true;
+            }
+            bankEquipmentLoaded = true;
         }
         status = "Loading " + setup.getName() + " inventory";
         if (!inventorySetupLoader.loadInventory()) {
-            status = "Unable to load setup inventory";
-            bankingRetryAt = now + 1_000;
+            handleBankLoadFailure("inventory", now);
             return true;
         }
+        if (!doesSelectedSetupMatch()) {
+            handleBankLoadFailure("verification", now);
+            return true;
+        }
+        bankingLoadInProgress = false;
+        bankingLoadAttempts = 0;
 
-        Rs2Bank.closeBank();
-        if (config.usePohBanking() && config.returnViaPohFairyRing()) {
-            bankingStep = BankingStep.RETURN_POH_TELEPORT;
-            bankingRetryAt = now + 1_000;
-            status = "Restocked — returning to POH fairy ring";
+        if (!ensureBankClosedForTeleport(now)) return true;
+        if (config.returnTravelMethod() == AraxxorConfig.ReturnTravelMethod.SPIDER_CAVE_TELEPORT) {
+            if (!Rs2Inventory.hasItem(SPIDER_CAVE_TELEPORT)) {
+                failSafe("Selected return route requires a Spider cave teleport in the setup");
+                return true;
+            }
+            bankingStep = BankingStep.RETURN_SPIDER_CAVE_TELEPORT;
+            bankingRetryAt = now + 250;
+            status = "Restocked — using direct Spider Cave teleport";
             return true;
         }
-        finishBankingTrip();
-        return false;
+        bankingStep = BankingStep.RETURN_POH_TELEPORT;
+        bankingRetryAt = now + 1_000;
+        status = "Restocked — returning to POH fairy ring ALQ";
+        return true;
+    }
+
+    private boolean doesSelectedSetupMatch() {
+        InventorySetup setup = config.inventorySetup();
+        if (setup == null) return false;
+        ensureSelectedSetupLoader(setup);
+        return inventorySetupLoader.doesInventoryMatch()
+                && inventorySetupLoader.doesEquipmentMatch();
+    }
+
+    private void ensureSelectedSetupLoader(InventorySetup setup) {
+        if (inventorySetupLoader != null && setup.getName().equals(selectedInventorySetupName)) return;
+        selectedInventorySetupName = setup.getName();
+        inventorySetupLoader = new Rs2InventorySetup(setup, mainScheduledFuture);
+    }
+
+    private void handleBankLoadFailure(String stage, long now) {
+        bankingLoadAttempts++;
+        if (bankingLoadAttempts >= 3) {
+            failSafe("Unable to load Inventory Setup " + stage + " after "
+                    + bankingLoadAttempts + " attempts; check bank supplies and setup quantities");
+            return;
+        }
+        long retryDelay = bankingLoadAttempts * 2_000L;
+        status = "Setup " + stage + " incomplete — retry " + bankingLoadAttempts
+                + "/3 in " + (retryDelay / 1_000) + "s";
+        bankingRetryAt = now + retryDelay;
+        traceEvent("BANK_LOAD_RETRY", "stage=" + stage + " attempt=" + bankingLoadAttempts
+                + " delayMs=" + retryDelay);
+    }
+
+    private boolean isNearBankForRouting() {
+        if (Rs2Bank.isNearBank(12)) return true;
+        PlayerSnapshot player = readPlayer();
+        return player != null && player.getWorldLocation().getPlane() == 0
+                && player.getWorldLocation().distanceTo(GRAND_EXCHANGE_BANK_AREA) <= 18;
+    }
+
+    private BankingStep chooseInitialBankingStep() {
+        if (isNearBankForRouting()) {
+            status = "Already near a bank — banking directly";
+            traceEvent("BANK_ROUTE", "nearBank=true selected=BANK");
+            return BankingStep.BANK;
+        }
+        if (!config.usePohBanking()) return BankingStep.BANK;
+        return PohTeleports.isInHouse() ? BankingStep.POH_RESTORE : BankingStep.POH_TELEPORT;
     }
 
     private void finishBankingTrip() {
         bankingRequired = false;
+        bankEquipmentLoaded = false;
+        bankingLoadInProgress = false;
+        bankingLoadAttempts = 0;
         bankingRetryAt = 0;
-        pohPoolUsed = false;
         bankingStep = null;
         killCount = 0;
         state = AraxxorState.IDLE;
@@ -3886,6 +4266,17 @@ public class AraxxorScript extends StateMachineScript<AraxxorScript.EncounterPha
         return Rs2Inventory.interact(itemName, "break")
                 || Rs2Inventory.interact(itemName, "rub")
                 || Rs2Inventory.interact(itemName, "teleport");
+    }
+
+    private boolean ensureBankClosedForTeleport(long now) {
+        if (!Rs2Bank.isOpen()) return true;
+        status = "Closing bank before teleport";
+        if (!Rs2Bank.closeBank() || Rs2Bank.isOpen()) {
+            status = "Unable to close bank — retrying teleport";
+            bankingRetryAt = now + 500;
+            return false;
+        }
+        return true;
     }
 
     private boolean isHealthAndPrayerRestored() {

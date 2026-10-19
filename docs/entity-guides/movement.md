@@ -451,3 +451,24 @@ fallback click toward a nearer visible tile, the walker aligns toward the reques
 
 **Defensive check:** `RouteCameraPolicyTest` covers visible, hidden, aligned, recently
 failed, near, and throttled cases.
+
+## 24. Recover interactions in an instance using scene-local movement
+
+A loaded object's `WorldPoint` can identify its template tile while the player and global
+walker are operating in a different instance coordinate space. Do not pass that point to
+the web walker after an interaction reports that the target cannot be reached. If the object
+has a valid `LocalPoint` in the loaded scene, approach it using instance-local movement and
+retry the interaction on the next script iteration.
+
+**Why this matters:** POH objects such as fairy rings can be found and clicked correctly but
+still require the player to move around furniture first. Treating their template tile as an
+overworld destination makes shortest-path search attempt an impossible route and prevents the
+fairy-ring interface from opening.
+
+**Where this applies:** `Rs2GameObject.clickObject` can't-reach recovery and any helper that
+interacts with loaded objects inside POHs, boss arenas, minigames, or other dynamic instances.
+
+**Defensive check:** Place the POH fairy ring several tiles away or behind another furnishing,
+trigger one failed interaction, and verify recovery issues a local scene walk without starting
+a shortest-path route to the ring's template coordinates. The following retry should open the
+fairy-ring interface.

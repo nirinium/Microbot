@@ -55,7 +55,7 @@ import java.util.WeakHashMap;
 @Slf4j
 public class AraxxorPlugin extends Plugin {
 
-    public static final String VERSION = "1.0.55";
+    public static final String VERSION = "1.0.71";
 
     private int lastRangedExperience;
     private int lastHitpointsExperience;
@@ -243,6 +243,13 @@ public class AraxxorPlugin extends Plugin {
     public void onHitsplatApplied(HitsplatApplied event) {
         if (event.getActor() == client.getLocalPlayer()) {
             script.onPlayerDamage(event.getHitsplat().getAmount());
+        }
+    }
+
+    @Subscribe
+    public void onActorDeath(ActorDeath event) {
+        if (event.getActor() == client.getLocalPlayer()) {
+            script.onPlayerDeath();
         }
     }
 
