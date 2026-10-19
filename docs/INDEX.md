@@ -7,6 +7,7 @@
 - [Runtime CLI](MICROBOT_CLI.md)
 - [Agent Server](AGENT_SERVER.md)
 - [Agentic Testing Loop](AGENTIC_TESTING_LOOP.md)
+- [Release E2E Smoke Test](RELEASE_E2E.md)
 - [Entity Guides](entity-guides/README.md)
 - [Gallery](gallery.md)
 - [Niri Araxxor Guide](../runelite-client/src/main/java/net/runelite/client/plugins/microbot/niriaraxxor/README.md)
