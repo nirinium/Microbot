@@ -2,6 +2,8 @@ package net.runelite.client.plugins.microbot.nirigrotesqueguardians;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.GraphicsObject;
+import net.runelite.api.Projectile;
 import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.AnimationID;
@@ -97,6 +99,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private static final Set<Integer> PHASE_4_IDS = Set.of(
             NpcID.GARGBOSS_DUSK_PHASE4
     );
+    private static final Set<Integer> PHASE_4_PRISON_IDS = Set.of(
+            NpcID.GARGBOSS_DUSK_PHASE4_SPAWN, NpcID.GARGBOSS_DUSK_PHASE4
+    );
     private static final int[] ALL_BOSS_IDS = {
             NpcID.GARGBOSS_DUSK_SPAWN, NpcID.GARGBOSS_DAWN_SPAWN,
             NpcID.GARGBOSS_DUSK_PHASE1_DEFENSIVE, NpcID.GARGBOSS_DAWN_PHASE1,
@@ -146,6 +151,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_210_DARK, SpotanimID.GARGBOSS_DEBRIS_SHADOW_240_DARK,
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_270_DARK, SpotanimID.GARGBOSS_DEBRIS_SHADOW_300_DARK
     );
+    private static final Set<Integer> STONE_BALL_PROJECTILES = Set.of(
+            SpotanimID.GG_FALLING_PROJECTILE, SpotanimID.GARGBOSS_EXPLODING_PROJECTILE
+    );
 
     private enum AttackStyle { MELEE, RANGED }
 
@@ -159,8 +167,23 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         }
     }
 
+    private static final class HazardObservation {
+        private final String type;
+        private final int id;
+        private final int startCycle;
+        private final WorldPoint location;
+
+        private HazardObservation(String type, int id, int startCycle, WorldPoint location) {
+            this.type = type;
+            this.id = id;
+            this.startCycle = startCycle;
+            this.location = location;
+        }
+    }
+
     private GrotesqueGuardiansConfig config;
     private final Map<WorldPoint, Hazard> hazards = new ConcurrentHashMap<>();
+    private final Set<String> processedHazardObservations = ConcurrentHashMap.newKeySet();
     @Getter
     private volatile GrotesqueGuardiansState displayState = GrotesqueGuardiansState.IDLE;
     @Getter
@@ -197,6 +220,10 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile int evadeUntilTick;
     private volatile int prisonUntilTick;
     private volatile WorldPoint prisonCenter;
+    private volatile WorldPoint prisonOrigin;
+    private volatile int prisonDetectedTick = -1;
+    private volatile boolean prisonPending;
+    private volatile boolean p4PrisonAnimationActive;
     private volatile AttackStyle lastDuskAttack = AttackStyle.MELEE;
     private volatile int specEnergy;
     private boolean specialAttackArmed;
@@ -239,6 +266,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile int lastBossAnimationTick = -1;
     private volatile int lastP2SpecialTick = -1;
     private volatile String lastP2SpecialDetectionSource = "None";
+    private volatile int lastP4PrisonTick = -1;
+    private volatile String lastP4PrisonDetectionSource = "None";
     private volatile int lastGraphicsId = -1;
     private volatile WorldPoint lastGraphicsLocation;
     private volatile int lastProjectileId = -1;
@@ -380,6 +409,11 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             killCompleted = false;
             surgeUsedThisKill = false;
             brewRestorePending = false;
+            hazards.clear();
+            processedHazardObservations.clear();
+            prisonPending = false;
+            prisonCenter = null;
+            prisonOrigin = null;
         }
         if (to == GrotesqueGuardiansState.DAWN_PHASE_3) {
             deathChargeHandled = false;
@@ -431,6 +465,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         encounter.put("prisonUntilTick", prisonUntilTick);
         encounter.put("prisonCenter", prisonCenter == null ? null
                 : prisonCenter.getX() + "," + prisonCenter.getY() + "," + prisonCenter.getPlane());
+        encounter.put("prisonOrigin", pointText(prisonOrigin));
+        encounter.put("prisonPending", prisonPending);
         encounter.put("evading", gameTick <= evadeUntilTick);
         encounter.put("escapingPrison", gameTick <= prisonUntilTick);
         encounter.put("duskSpecialsUsedThisPhase", duskSpecialsUsedThisPhase);
@@ -444,6 +480,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         events.put("lastBossAnimationTick", lastBossAnimationTick);
         events.put("lastP2SpecialTick", lastP2SpecialTick);
         events.put("lastP2SpecialDetectionSource", lastP2SpecialDetectionSource);
+        events.put("lastP4PrisonTick", lastP4PrisonTick);
+        events.put("lastP4PrisonDetectionSource", lastP4PrisonDetectionSource);
         events.put("lastGraphicsId", lastGraphicsId);
         events.put("lastGraphicsLocation", pointText(lastGraphicsLocation));
         events.put("lastProjectileId", lastProjectileId);
@@ -536,6 +574,16 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 .filter(npc -> PHASE_2_IDS.contains(npc.getId()))
                 .findFirst()
                 .ifPresent(this::pollP2SpecialAnimation);
+        Rs2NpcModel p4Dusk = bosses.stream()
+                .filter(npc -> PHASE_4_PRISON_IDS.contains(npc.getId()))
+                .findFirst()
+                .orElse(null);
+        if (p4Dusk == null) {
+            p4PrisonAnimationActive = false;
+        } else {
+            pollP4PrisonAnimation(p4Dusk);
+        }
+        pollTileHazards();
         bellPresent = Microbot.getRs2TileObjectCache().query().withIds(BELL_IDS).nearest() != null;
         dawnWeapon = resolveGearItem(config.customDawnWeapon(), DAWN_WEAPON_BRACKETS);
         duskWeapon = resolveGearItem(config.customDuskWeapon(), DUSK_WEAPON_BRACKETS);
@@ -974,6 +1022,16 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             }
             if (!candidates.isEmpty()) break;
         }
+        if (candidates.isEmpty()) {
+            for (int x = -1; x <= 1; x++) {
+                for (int y = -1; y <= 1; y++) {
+                    if (x == 0 && y == 0) continue;
+                    WorldPoint tile = prisonCenter.dx(x).dy(y);
+                    if (isDangerous(tile) || (duskArea != null && duskArea.contains(tile))) continue;
+                    if (Rs2Walker.isWalkableInCollisionMap(tile)) candidates.add(tile);
+                }
+            }
+        }
         return candidates.stream()
                 .min(Comparator.comparingInt(tile -> distance(tile, playerLocation)))
                 .orElse(null);
@@ -1000,6 +1058,14 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                            int boostedAttack, int realAttack, int boostedStrength, int realStrength) {
         gameTick = tick;
         playerLocation = location;
+        if (prisonPending && tick > prisonDetectedTick && location != null) {
+            prisonCenter = location;
+            prisonPending = false;
+        } else if (tick > prisonUntilTick) {
+            prisonCenter = null;
+            prisonOrigin = null;
+            prisonPending = false;
+        }
         hitpoints = hp;
         maxHitpoints = Math.max(1, maxHp);
         this.prayer = prayer;
@@ -1018,10 +1084,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         lastBossAnimationTick = gameTick;
         if (PHASE_2_IDS.contains(npcId) && isP2SpecialAnimation(animation)) {
             detectP2Special("AnimationChanged");
-        } else if (animation == AnimationID.GG_DUSK_ENRAGE_ATTACK_SPECIAL
-                || animation == AnimationID.GG_DUSK_ATTACK_FORCEFIELD) {
-            prisonUntilTick = Math.max(prisonUntilTick, gameTick + 5);
-            prisonCenter = playerLocation;
+        } else if (PHASE_4_PRISON_IDS.contains(npcId) && isP4PrisonAnimation(animation)) {
+            p4PrisonAnimationActive = true;
+            detectP4Prison("AnimationChanged");
         } else if (animation == AnimationID.GG_DUSK_ENRAGE_ATTACK_RANGED) {
             lastDuskAttack = AttackStyle.RANGED;
         } else if (animation == AnimationID.GG_DUSK_ENRAGE_ATTACK_SLASH) {
@@ -1051,22 +1116,91 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         }
     }
 
-    public void onGraphicsObject(int id, WorldPoint location) {
-        lastGraphicsId = id;
-        lastGraphicsLocation = location;
-        if (LIGHTNING_GRAPHICS.contains(id)) {
+    private void pollP4PrisonAnimation(Rs2NpcModel dusk) {
+        int animation = Microbot.getClientThread().runOnClientThreadOptional(
+                () -> dusk.getNpc().getAnimation()).orElse(-1);
+        if (!isP4PrisonAnimation(animation)) {
+            p4PrisonAnimationActive = false;
+            return;
+        }
+        lastBossNpcId = dusk.getId();
+        lastBossAnimation = animation;
+        lastBossAnimationTick = gameTick;
+        if (!p4PrisonAnimationActive) detectP4Prison("snapshotPoll");
+        p4PrisonAnimationActive = true;
+    }
+
+    private boolean isP4PrisonAnimation(int animation) {
+        return animation == AnimationID.GG_DUSK_ENRAGE_ATTACK_SPECIAL
+                || animation == AnimationID.GG_DUSK_ATTACK_FORCEFIELD;
+    }
+
+    private void detectP4Prison(String source) {
+        if (gameTick <= prisonUntilTick && (prisonPending || prisonCenter != null)) return;
+        prisonDetectedTick = gameTick;
+        prisonUntilTick = gameTick + 5;
+        prisonOrigin = playerLocation;
+        prisonCenter = null;
+        prisonPending = true;
+        lastP4PrisonTick = gameTick;
+        lastP4PrisonDetectionSource = source;
+    }
+
+    private void pollTileHazards() {
+        List<HazardObservation> observations = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            List<HazardObservation> snapshot = new ArrayList<>();
+            for (GraphicsObject graphics : Microbot.getClient().getTopLevelWorldView().getGraphicsObjects()) {
+                int id = graphics.getId();
+                if (!LIGHTNING_GRAPHICS.contains(id) && !DEBRIS_GRAPHICS.contains(id)) continue;
+                WorldPoint location = WorldPoint.fromLocal(Microbot.getClient(), graphics.getLocation());
+                if (location != null) {
+                    snapshot.add(new HazardObservation("graphics", id, graphics.getStartCycle(), location));
+                }
+            }
+            for (Projectile projectile : Microbot.getClient().getProjectiles()) {
+                if (!STONE_BALL_PROJECTILES.contains(projectile.getId())) continue;
+                WorldPoint target = projectile.getTargetPoint();
+                if (target != null) {
+                    snapshot.add(new HazardObservation(
+                            "projectile", projectile.getId(), projectile.getStartCycle(), target));
+                }
+            }
+            return snapshot;
+        }).orElse(List.of());
+        observations.forEach(this::registerHazardObservation);
+    }
+
+    private void registerHazardObservation(HazardObservation observation) {
+        WorldPoint location = observation.location;
+        String key = observation.type + ':' + observation.id + ':' + observation.startCycle + ':'
+                + location.getX() + ':' + location.getY() + ':' + location.getPlane();
+        if (!processedHazardObservations.add(key)) return;
+        if ("projectile".equals(observation.type)) {
+            lastProjectileId = observation.id;
+            lastProjectileTarget = location;
+            hazards.put(location, new Hazard(1, gameTick + config.debrisAvoidTicks()));
+            return;
+        }
+        lastGraphicsId = observation.id;
+        lastGraphicsLocation = observation.location;
+        if (LIGHTNING_GRAPHICS.contains(observation.id)) {
             hazards.put(location, new Hazard(1, gameTick + config.lightningAvoidTicks()));
-        } else if (DEBRIS_GRAPHICS.contains(id)) {
+        } else if (DEBRIS_GRAPHICS.contains(observation.id)) {
             hazards.put(location, new Hazard(1, gameTick + config.debrisAvoidTicks()));
         }
     }
 
-    public void onProjectile(int id, WorldPoint target) {
-        lastProjectileId = id;
-        lastProjectileTarget = target;
-        if (target != null && id == SpotanimID.GARGBOSS_EXPLODING_PROJECTILE) {
-            hazards.put(target, new Hazard(1, gameTick + config.debrisAvoidTicks()));
-        }
+    public void onGraphicsObject(int id, WorldPoint location, int startCycle) {
+        lastGraphicsId = id;
+        lastGraphicsLocation = location;
+        if (location == null
+                || (!LIGHTNING_GRAPHICS.contains(id) && !DEBRIS_GRAPHICS.contains(id))) return;
+        registerHazardObservation(new HazardObservation("graphics", id, startCycle, location));
+    }
+
+    public void onProjectile(int id, WorldPoint target, int startCycle) {
+        if (target == null || !STONE_BALL_PROJECTILES.contains(id)) return;
+        registerHazardObservation(new HazardObservation("projectile", id, startCycle, target));
     }
 
     public void onKillCompleted() {
@@ -1097,6 +1231,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     public void shutdown() {
         disablePrayers();
         hazards.clear();
+        processedHazardObservations.clear();
         super.shutdown();
         displayState = GrotesqueGuardiansState.IDLE;
         status = "Stopped";

@@ -36,7 +36,7 @@ import java.awt.GraphicsEnvironment;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class GrotesqueGuardiansPlugin extends Plugin {
-    public static final String VERSION = "0.7.3";
+    public static final String VERSION = "0.7.4";
 
     @Inject
     private Client client;
@@ -116,7 +116,9 @@ public class GrotesqueGuardiansPlugin extends Plugin {
     public void onGraphicsObjectCreated(GraphicsObjectCreated event) {
         GraphicsObject graphics = event.getGraphicsObject();
         WorldPoint location = WorldPoint.fromLocal(client, graphics.getLocation());
-        if (location != null) script.onGraphicsObject(graphics.getId(), location);
+        if (location != null) {
+            script.onGraphicsObject(graphics.getId(), location, graphics.getStartCycle());
+        }
     }
 
     @Subscribe
@@ -124,7 +126,7 @@ public class GrotesqueGuardiansPlugin extends Plugin {
         Projectile projectile = event.getProjectile();
         WorldPoint target = projectile.getTargetPoint();
         if (target == null) target = WorldPoint.fromLocal(client, event.getPosition());
-        script.onProjectile(projectile.getId(), target);
+        script.onProjectile(projectile.getId(), target, projectile.getStartCycle());
     }
 
     @Subscribe
