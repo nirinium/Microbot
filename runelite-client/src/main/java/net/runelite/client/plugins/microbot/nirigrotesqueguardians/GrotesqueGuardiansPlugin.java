@@ -36,7 +36,7 @@ import java.awt.GraphicsEnvironment;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class GrotesqueGuardiansPlugin extends Plugin {
-    public static final String VERSION = "0.7.1";
+    public static final String VERSION = "0.7.2";
 
     @Inject
     private Client client;

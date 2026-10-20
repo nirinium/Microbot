@@ -198,6 +198,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile WorldPoint prisonCenter;
     private volatile AttackStyle lastDuskAttack = AttackStyle.MELEE;
     private volatile int specEnergy;
+    private boolean specialAttackArmed;
     private boolean deathChargeHandled;
     private boolean dawnSpecDumpComplete;
     private int duskSpecialsUsedThisPhase;
@@ -206,6 +207,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private boolean brewRestorePending;
     private int specEnergyBeforeAttack;
     private int specObservationDeadlineTick;
+    private int specArmRequestedTick = -100;
     private int lastSpecActionTick = -100;
 
     // Refreshed immediately before step(); transition guards only read these fields.
@@ -253,25 +255,16 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 transitions.add(transition(from, GrotesqueGuardiansState.DEAD,
                         () -> playerDead, "playerDead", "Player died"));
             }
-            if (from == GrotesqueGuardiansState.DEAD
-                    || from == GrotesqueGuardiansState.ERROR) continue;
-            if (from != GrotesqueGuardiansState.DAWN_PHASE_1) {
-                transitions.add(transition(from, GrotesqueGuardiansState.DAWN_PHASE_1,
-                        () -> phase1Present, "phase1Present", "Dawn phase one detected"));
-            }
-            if (from != GrotesqueGuardiansState.DUSK_PHASE_2) {
-                transitions.add(transition(from, GrotesqueGuardiansState.DUSK_PHASE_2,
-                        () -> phase2Present, "phase2Present", "Dusk phase two detected"));
-            }
-            if (from != GrotesqueGuardiansState.DAWN_PHASE_3) {
-                transitions.add(transition(from, GrotesqueGuardiansState.DAWN_PHASE_3,
-                        () -> phase3Present, "phase3Present", "Dawn phase three detected"));
-            }
-            if (from != GrotesqueGuardiansState.DUSK_PHASE_4) {
-                transitions.add(transition(from, GrotesqueGuardiansState.DUSK_PHASE_4,
-                        () -> phase4Present, "phase4Present", "Dusk phase four detected"));
-            }
         }
+        // Boss forms can overlap briefly while an NPC transforms. Prefer the latest visible
+        // phase and never allow an established encounter to move backwards.
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.IDLE, 1);
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.STARTING, 1);
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.OUT_OF_SUPPLIES, 1);
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.LOOTING, 1);
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.DAWN_PHASE_1, 2);
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.DUSK_PHASE_2, 3);
+        addPhaseTransitions(transitions, GrotesqueGuardiansState.DAWN_PHASE_3, 4);
         transitions.add(transition(GrotesqueGuardiansState.IDLE, GrotesqueGuardiansState.OUT_OF_SUPPLIES,
                 () -> !finisherPresent || !foodPresent || !combatGearPresent,
                 "!finisherPresent || !foodPresent || !combatGearPresent",
@@ -298,6 +291,26 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         transitions.add(transition(GrotesqueGuardiansState.ERROR, GrotesqueGuardiansState.IDLE,
                 () -> !anyBossPresent && bellPresent, "!anyBossPresent && bellPresent", "Encounter reset"));
         return transitions;
+    }
+
+    private void addPhaseTransitions(List<Transition<GrotesqueGuardiansState>> transitions,
+                                     GrotesqueGuardiansState from, int earliestPhase) {
+        if (earliestPhase <= 4) {
+            transitions.add(transition(from, GrotesqueGuardiansState.DUSK_PHASE_4,
+                    () -> phase4Present, "phase4Present", "Dusk phase four detected"));
+        }
+        if (earliestPhase <= 3) {
+            transitions.add(transition(from, GrotesqueGuardiansState.DAWN_PHASE_3,
+                    () -> phase3Present, "phase3Present", "Dawn phase three detected"));
+        }
+        if (earliestPhase <= 2) {
+            transitions.add(transition(from, GrotesqueGuardiansState.DUSK_PHASE_2,
+                    () -> phase2Present, "phase2Present", "Dusk phase two detected"));
+        }
+        if (earliestPhase <= 1) {
+            transitions.add(transition(from, GrotesqueGuardiansState.DAWN_PHASE_1,
+                    () -> phase1Present, "phase1Present", "Dawn phase one detected"));
+        }
     }
 
     private Transition<GrotesqueGuardiansState> transition(
@@ -373,6 +386,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             dawnSpecDumpComplete = false;
             waitingForSpecEnergyDrop = false;
             specEnergyBeforeAttack = -1;
+            specArmRequestedTick = -100;
+            lastSpecActionTick = -100;
             duskSpecialsUsedThisPhase = 0;
         }
         if (to == GrotesqueGuardiansState.LOOTING) {
@@ -416,6 +431,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         encounter.put("evading", gameTick <= evadeUntilTick);
         encounter.put("escapingPrison", gameTick <= prisonUntilTick);
         encounter.put("duskSpecialsUsedThisPhase", duskSpecialsUsedThisPhase);
+        encounter.put("waitingForSpecEnergyDrop", waitingForSpecEnergyDrop);
+        encounter.put("specialAttackArmed", specialAttackArmed);
         encounter.put("loopRunning", isRunning());
 
         Map<String, Object> events = new LinkedHashMap<>();
@@ -518,6 +535,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         duskBody = resolveGearItem("", DUSK_BODY_BRACKETS);
         dawnSpecWeapon = resolveDawnSpecWeapon();
         specEnergy = Rs2Combat.getSpecEnergy();
+        specialAttackArmed = Rs2Combat.getSpecState();
         GrotesqueGuardiansFinisher resolvedFinisher = resolveFinisher();
         finisher = resolvedFinisher == null ? "None" : resolvedFinisher.itemName();
         finisherItemId = resolvedFinisher == null ? -1 : resolvedFinisher.itemId();
@@ -671,18 +689,27 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             Rs2Tab.switchTo(InterfaceTab.COMBAT);
             return true;
         }
+        if (!specialAttackArmed) {
+            if (gameTick <= specArmRequestedTick) {
+                status = "Waiting for " + dawnSpecWeapon + " special attack to arm";
+                return true;
+            }
+            status = "Arming " + dawnSpecWeapon + " special attack";
+            boolean armed = Rs2Combat.setSpecState(true, specCost);
+            recordAction("ARM_SPECIAL_ATTACK", dawnSpecWeapon + " cost=" + specCost, armed);
+            if (armed) specArmRequestedTick = gameTick;
+            return true;
+        }
         if (gameTick - lastSpecActionTick < config.attackRetryTicks()) return true;
         status = "Using " + dawnSpecWeapon + " spec on Dusk P" + (phaseFour ? "4" : "2")
                 + " (" + (duskSpecialsUsedThisPhase + 1) + "/" + phaseLimit + ")";
-        boolean specEnabled = Rs2Combat.setSpecState(true, specCost);
-        boolean attacked = specEnabled && dusk.click("Attack");
-        recordAction("ATTACK_NPC", "Dusk id=" + dusk.getId() + " special=true specEnabled=" + specEnabled,
-                attacked);
+        boolean attacked = dusk.click("Attack");
+        recordAction("ATTACK_NPC", "Dusk id=" + dusk.getId() + " special=true specArmed=true", attacked);
+        lastSpecActionTick = gameTick;
         if (attacked) {
             specEnergyBeforeAttack = specEnergy;
             specObservationDeadlineTick = gameTick + 4;
             waitingForSpecEnergyDrop = true;
-            lastSpecActionTick = gameTick;
         }
         return true;
     }
