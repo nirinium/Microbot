@@ -137,7 +137,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_300, SpotanimID.GARGBOSS_DEBRIS_SHADOW_60_SMALL,
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_90_SMALL, SpotanimID.GARGBOSS_DEBRIS_SHADOW_180_LARGE,
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_270_LARGE, SpotanimID.GARGBOSS_DEBRIS_SHADOW_300_LARGE,
-            SpotanimID.GARGBOSS_RAIN_SHADOW_90, SpotanimID.GARGBOSS_DEBRIS_SHADOW_30,
+            SpotanimID.GARGBOSS_DEBRIS_SHADOW_120_SMALL, SpotanimID.GARGBOSS_RAIN_SHADOW_90,
+            SpotanimID.GARGBOSS_DEBRIS_SHADOW_30,
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_30_DARK, SpotanimID.GARGBOSS_DEBRIS_SHADOW_60_DARK,
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_90_DARK, SpotanimID.GARGBOSS_DEBRIS_SHADOW_120_DARK,
             SpotanimID.GARGBOSS_DEBRIS_SHADOW_150_DARK, SpotanimID.GARGBOSS_DEBRIS_SHADOW_180_DARK,
@@ -236,6 +237,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile int lastBossNpcId = -1;
     private volatile int lastBossAnimation = -1;
     private volatile int lastBossAnimationTick = -1;
+    private volatile int lastP2SpecialTick = -1;
+    private volatile String lastP2SpecialDetectionSource = "None";
     private volatile int lastGraphicsId = -1;
     private volatile WorldPoint lastGraphicsLocation;
     private volatile int lastProjectileId = -1;
@@ -439,6 +442,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         events.put("lastBossNpcId", lastBossNpcId);
         events.put("lastBossAnimation", lastBossAnimation);
         events.put("lastBossAnimationTick", lastBossAnimationTick);
+        events.put("lastP2SpecialTick", lastP2SpecialTick);
+        events.put("lastP2SpecialDetectionSource", lastP2SpecialDetectionSource);
         events.put("lastGraphicsId", lastGraphicsId);
         events.put("lastGraphicsLocation", pointText(lastGraphicsLocation));
         events.put("lastProjectileId", lastProjectileId);
@@ -527,6 +532,10 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         phase3Present = bosses.stream().anyMatch(npc -> PHASE_3_IDS.contains(npc.getId()));
         phase4Present = bosses.stream().anyMatch(npc -> PHASE_4_IDS.contains(npc.getId()));
         anyBossPresent = !bosses.isEmpty();
+        bosses.stream()
+                .filter(npc -> PHASE_2_IDS.contains(npc.getId()))
+                .findFirst()
+                .ifPresent(this::pollP2SpecialAnimation);
         bellPresent = Microbot.getRs2TileObjectCache().query().withIds(BELL_IDS).nearest() != null;
         dawnWeapon = resolveGearItem(config.customDawnWeapon(), DAWN_WEAPON_BRACKETS);
         duskWeapon = resolveGearItem(config.customDuskWeapon(), DUSK_WEAPON_BRACKETS);
@@ -554,14 +563,27 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         WorldArea duskArea = dusk == null ? null : dusk.getWorldArea();
         boolean adjacentDuringP2Special = gameTick <= evadeUntilTick && duskArea != null
                 && duskArea.distanceTo(playerLocation) < config.p2DodgeDistance();
+        boolean standingUnderDusk = duskArea != null && duskArea.contains(playerLocation);
         boolean insidePrison = gameTick <= prisonUntilTick && prisonCenter != null
                 && distance(prisonCenter, playerLocation) <= 1;
-        if (standingInDanger || adjacentDuringP2Special || insidePrison) {
-            WorldPoint safe = insidePrison ? findPrisonExit(dusk) : findSafeTile(dusk);
+        if (standingInDanger || adjacentDuringP2Special || standingUnderDusk || insidePrison) {
+            WorldPoint safe;
+            if (insidePrison) {
+                safe = findPrisonExit(dusk);
+            } else if (adjacentDuringP2Special) {
+                safe = findP2DodgeTile(dusk);
+            } else {
+                safe = findSafeTile(dusk);
+            }
             if (safe != null && gameTick > lastMoveTick) {
-                status = insidePrison ? "Escaping prison through the open side" : "Dodging hazard";
+                status = insidePrison ? "Escaping prison through the open side"
+                        : adjacentDuringP2Special ? "Stepping away from Dusk's blinding attack"
+                        : standingUnderDusk ? "Moving out from under Dusk" : "Dodging tile hazard";
                 boolean moved = Rs2Walker.walkFastCanvas(safe);
-                recordAction(insidePrison ? "ESCAPE_PRISON" : "DODGE_HAZARD",
+                String action = insidePrison ? "ESCAPE_PRISON"
+                        : adjacentDuringP2Special ? "DODGE_P2_BLINDING_ATTACK"
+                        : standingUnderDusk ? "DODGE_DUSK_TRAMPLE" : "DODGE_HAZARD";
+                recordAction(action,
                         "target=" + safe.getX() + "," + safe.getY(), moved);
                 lastMoveTick = gameTick;
                 return moved;
@@ -916,6 +938,27 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         return candidates.stream().min(Comparator.comparingInt(tile -> distance(tile, playerLocation))).orElse(null);
     }
 
+    private WorldPoint findP2DodgeTile(Rs2NpcModel dusk) {
+        if (playerLocation == null || dusk == null) return null;
+        WorldArea duskArea = dusk.getWorldArea();
+        if (duskArea == null) return null;
+        int currentDistance = duskArea.distanceTo(playerLocation);
+        List<WorldPoint> fartherTiles = new ArrayList<>();
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                if (x == 0 && y == 0) continue;
+                WorldPoint tile = playerLocation.dx(x).dy(y);
+                if (isDangerous(tile) || duskArea.contains(tile)
+                        || duskArea.distanceTo(tile) <= currentDistance
+                        || !Rs2Walker.isWalkableInCollisionMap(tile)) continue;
+                fartherTiles.add(tile);
+            }
+        }
+        return fartherTiles.stream()
+                .max(Comparator.comparingInt(duskArea::distanceTo))
+                .orElseGet(() -> findSafeTile(dusk));
+    }
+
     private WorldPoint findPrisonExit(Rs2NpcModel dusk) {
         if (prisonCenter == null || playerLocation == null) return null;
         WorldArea duskArea = dusk == null ? null : dusk.getWorldArea();
@@ -973,9 +1016,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         lastBossNpcId = npcId;
         lastBossAnimation = animation;
         lastBossAnimationTick = gameTick;
-        if (animation == AnimationID.GG_DUSK_FLY_UP
-                || animation == AnimationID.GG_DUSK_ATTACK_SPECIAL) {
-            evadeUntilTick = Math.max(evadeUntilTick, gameTick + config.p2EvadeTicks());
+        if (PHASE_2_IDS.contains(npcId) && isP2SpecialAnimation(animation)) {
+            detectP2Special("AnimationChanged");
         } else if (animation == AnimationID.GG_DUSK_ENRAGE_ATTACK_SPECIAL
                 || animation == AnimationID.GG_DUSK_ATTACK_FORCEFIELD) {
             prisonUntilTick = Math.max(prisonUntilTick, gameTick + 5);
@@ -984,6 +1026,28 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             lastDuskAttack = AttackStyle.RANGED;
         } else if (animation == AnimationID.GG_DUSK_ENRAGE_ATTACK_SLASH) {
             lastDuskAttack = AttackStyle.MELEE;
+        }
+    }
+
+    private void pollP2SpecialAnimation(Rs2NpcModel dusk) {
+        int animation = Microbot.getClientThread().runOnClientThreadOptional(
+                () -> dusk.getNpc().getAnimation()).orElse(-1);
+        if (!isP2SpecialAnimation(animation)) return;
+        lastBossNpcId = dusk.getId();
+        lastBossAnimation = animation;
+        lastBossAnimationTick = gameTick;
+        detectP2Special("snapshotPoll");
+    }
+
+    private boolean isP2SpecialAnimation(int animation) {
+        return animation == AnimationID.GG_DUSK_ATTACK_SPECIAL;
+    }
+
+    private void detectP2Special(String source) {
+        evadeUntilTick = Math.max(evadeUntilTick, gameTick + config.p2EvadeTicks());
+        if (lastP2SpecialTick != gameTick) {
+            lastP2SpecialTick = gameTick;
+            lastP2SpecialDetectionSource = source;
         }
     }
 
