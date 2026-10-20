@@ -116,30 +116,30 @@ public interface GrotesqueGuardiansConfig extends Config {
         return 8;
     }
 
-    @ConfigItem(keyName = "useDawnSpecialAttacks", name = "Use halberd specs on Dusk",
-            description = "Use one Crystal or Dragon halberd special in phase two and up to two in phase four",
+    @ConfigItem(keyName = "useDawnSpecialAttacks", name = "Use halberd specs on Dawn",
+            description = "Use Crystal or Dragon halberd special attacks on Dawn",
             position = 6, section = combatSection)
     default boolean useDawnSpecialAttacks() {
         return true;
     }
 
-    @ConfigItem(keyName = "p2SpecialCount", name = "Dusk P2 special count",
-            description = "Maximum halberd special attacks to use during Dusk phase two",
+    @ConfigItem(keyName = "p2SpecialCount", name = "Dawn P1 special count",
+            description = "Maximum halberd special attacks to use on Dawn during phase one",
             position = 7, section = combatSection)
     @Range(min = 0, max = 3)
-    default int p2SpecialCount() {
+    default int dawnP1SpecialCount() {
         return 1;
     }
 
-    @ConfigItem(keyName = "p4SpecialCount", name = "Dusk P4 special count",
-            description = "Maximum halberd special attacks to use during Dusk phase four",
+    @ConfigItem(keyName = "p4SpecialCount", name = "Dawn P3 special count",
+            description = "Maximum halberd special attacks to use on Dawn near the end of phase three",
             position = 8, section = combatSection)
     @Range(min = 0, max = 3)
-    default int p4SpecialCount() {
+    default int dawnP3SpecialCount() {
         return 2;
     }
 
-    @ConfigItem(keyName = "customDawnSpecWeapon", name = "Custom Dusk spec halberd",
+    @ConfigItem(keyName = "customDawnSpecWeapon", name = "Custom Dawn spec halberd",
             description = "Optional exact halberd name tried before Crystal and Dragon halberds",
             position = 9, section = combatSection)
     default String customDawnSpecWeapon() {
@@ -147,28 +147,36 @@ public interface GrotesqueGuardiansConfig extends Config {
     }
 
     @ConfigItem(keyName = "useDeathCharge", name = "Use Death Charge",
-            description = "Cast Death Charge at the start of Dawn phase three",
+            description = "Cast Death Charge when Dawn reaches the configured phase-three health threshold",
             position = 10, section = combatSection)
     default boolean useDeathCharge() {
         return true;
     }
 
+    @ConfigItem(keyName = "deathChargeAtPercent", name = "Death Charge at Dawn HP %",
+            description = "Cast Death Charge and begin the phase-three halberd spec dump at or below this health",
+            position = 11, section = combatSection)
+    @Range(min = 5, max = 50)
+    default int deathChargeAtPercent() {
+        return 25;
+    }
+
     @ConfigItem(keyName = "useSurgePotion", name = "Use surge potion",
             description = "After the kill, restore 25% special attack energy for the next fight when off cooldown",
-            position = 11, section = combatSection)
+            position = 12, section = combatSection)
     default boolean useSurgePotion() {
         return true;
     }
 
     @ConfigItem(keyName = "useOffensivePrayers", name = "Offensive prayers",
-            description = "Use Piety throughout the melee-only fight", position = 12, section = combatSection)
+            description = "Use Piety throughout the melee-only fight", position = 13, section = combatSection)
     default boolean useOffensivePrayers() {
         return true;
     }
 
     @ConfigItem(keyName = "useCombatPotions", name = "Use super combats",
             description = "Drink a super combat potion when Attack or Strength is no longer meaningfully boosted",
-            position = 13, section = combatSection)
+            position = 14, section = combatSection)
     default boolean useCombatPotions() {
         return true;
     }

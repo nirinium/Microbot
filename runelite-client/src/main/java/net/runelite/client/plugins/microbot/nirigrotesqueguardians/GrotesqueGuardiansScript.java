@@ -222,14 +222,15 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile WorldPoint prisonCenter;
     private volatile WorldPoint prisonOrigin;
     private volatile int prisonDetectedTick = -1;
-    private volatile boolean prisonPending;
     private volatile boolean p4PrisonAnimationActive;
     private volatile AttackStyle lastDuskAttack = AttackStyle.MELEE;
     private volatile int specEnergy;
     private boolean specialAttackArmed;
     private boolean deathChargeHandled;
     private boolean dawnSpecDumpComplete;
-    private int duskSpecialsUsedThisPhase;
+    private int dawnSpecialsUsedThisPhase;
+    private int deathChargeAttemptTick = -100;
+    private int prisonEscapeAttempts;
     private boolean waitingForSpecEnergyDrop;
     private boolean surgeUsedThisKill;
     private boolean brewRestorePending;
@@ -356,6 +357,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     protected void onState(GrotesqueGuardiansState state) {
         displayState = state;
         if (isEncounterState(state) && handleImmediateSafety()) return;
+        if (isEncounterState(state) && config.absorbSpheres() && handleHealingSphere()) return;
         switch (state) {
             case IDLE:
                 status = bellPresent ? "Ready" : "Start on the Slayer Tower roof";
@@ -411,21 +413,22 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             brewRestorePending = false;
             hazards.clear();
             processedHazardObservations.clear();
-            prisonPending = false;
             prisonCenter = null;
             prisonOrigin = null;
+            prisonEscapeAttempts = 0;
         }
         if (to == GrotesqueGuardiansState.DAWN_PHASE_3) {
             deathChargeHandled = false;
+            deathChargeAttemptTick = -100;
         }
-        if (to == GrotesqueGuardiansState.DUSK_PHASE_2
-                || to == GrotesqueGuardiansState.DUSK_PHASE_4) {
+        if (to == GrotesqueGuardiansState.DAWN_PHASE_1
+                || to == GrotesqueGuardiansState.DAWN_PHASE_3) {
             dawnSpecDumpComplete = false;
             waitingForSpecEnergyDrop = false;
             specEnergyBeforeAttack = -1;
             specArmRequestedTick = -100;
             lastSpecActionTick = -100;
-            duskSpecialsUsedThisPhase = 0;
+            dawnSpecialsUsedThisPhase = 0;
         }
         if (to == GrotesqueGuardiansState.LOOTING) {
             lootFinished = false;
@@ -466,10 +469,10 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         encounter.put("prisonCenter", prisonCenter == null ? null
                 : prisonCenter.getX() + "," + prisonCenter.getY() + "," + prisonCenter.getPlane());
         encounter.put("prisonOrigin", pointText(prisonOrigin));
-        encounter.put("prisonPending", prisonPending);
+        encounter.put("prisonEscapeAttempts", prisonEscapeAttempts);
         encounter.put("evading", gameTick <= evadeUntilTick);
         encounter.put("escapingPrison", gameTick <= prisonUntilTick);
-        encounter.put("duskSpecialsUsedThisPhase", duskSpecialsUsedThisPhase);
+        encounter.put("dawnSpecialsUsedThisPhase", dawnSpecialsUsedThisPhase);
         encounter.put("waitingForSpecEnergyDrop", waitingForSpecEnergyDrop);
         encounter.put("specialAttackArmed", specialAttackArmed);
         encounter.put("loopRunning", isRunning());
@@ -514,8 +517,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         tuning.put("p2EvadeTicks", config.p2EvadeTicks());
         tuning.put("lightningAvoidTicks", config.lightningAvoidTicks());
         tuning.put("debrisAvoidTicks", config.debrisAvoidTicks());
-        tuning.put("p2SpecialCount", config.p2SpecialCount());
-        tuning.put("p4SpecialCount", config.p4SpecialCount());
+        tuning.put("dawnP1SpecialCount", config.dawnP1SpecialCount());
+        tuning.put("dawnP3SpecialCount", config.dawnP3SpecialCount());
+        tuning.put("deathChargeAtPercent", config.deathChargeAtPercent());
         tuning.put("combatPotionBoostFloor", config.combatPotionBoostFloor());
         tuning.put("attackRetryTicks", config.attackRetryTicks());
         tuning.put("gearRetryTicks", config.gearRetryTicks());
@@ -633,6 +637,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                         : standingUnderDusk ? "DODGE_DUSK_TRAMPLE" : "DODGE_HAZARD";
                 recordAction(action,
                         "target=" + safe.getX() + "," + safe.getY(), moved);
+                if (insidePrison) prisonEscapeAttempts++;
                 lastMoveTick = gameTick;
                 return moved;
             }
@@ -696,40 +701,52 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     private void fightDawn(boolean phaseThree) {
-        if (phaseThree && config.absorbSpheres() && absorbSphere()) return;
         Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_RANGE, true);
         if (config.useOffensivePrayers()) Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, true);
         Rs2NpcModel dawn = nearestNpc(phaseThree ? PHASE_3_IDS : PHASE_1_IDS);
         if (dawn == null) return;
-        if (phaseThree && handleDeathCharge()) return;
+        int healthPercent = getHealthPercent(dawn);
+        if (phaseThree && handleDeathCharge(healthPercent)) return;
+        boolean readyForP3SpecDump = !phaseThree || healthPercent <= config.deathChargeAtPercent();
+        if (readyForP3SpecDump && handleDawnSpecials(dawn, phaseThree)) return;
         if (equip(dawnWeapon, "", dawnBody)) return;
         status = (phaseThree ? "Fighting Dawn P3 with " : "Fighting Dawn P1 with ") + dawnWeapon;
         attackOrFinish(dawn);
     }
 
-    private boolean handleDeathCharge() {
-        if (!deathChargeHandled) {
-            deathChargeHandled = true;
-            boolean deathChargeUnavailable = Microbot.getVarbitValue(VarbitID.ARCEUUS_DEATH_CHARGE_ACTIVE) != 0
-                    || Microbot.getVarbitValue(VarbitID.ARCEUUS_DEATH_CHARGE_COOLDOWN) != 0;
-            if (config.useDeathCharge() && !deathChargeUnavailable
-                    && Rs2Magic.canCast(Rs2Spells.DEATH_CHARGE)
-                    && Rs2Magic.cast(Rs2Spells.DEATH_CHARGE)) {
-                status = "Casting Death Charge";
-                return true;
-            }
-        }
-        return false;
+    private int getHealthPercent(Rs2NpcModel npc) {
+        int[] health = Microbot.getClientThread().runOnClientThreadOptional(() ->
+                new int[]{npc.getNpc().getHealthRatio(), npc.getNpc().getHealthScale()}).orElse(null);
+        if (health == null || health[0] <= 0 || health[1] <= 0) return 100;
+        return Math.min(100, health[0] * 100 / health[1]);
     }
 
-    private boolean handleDuskSpecials(Rs2NpcModel dusk, boolean phaseFour) {
+    private boolean handleDeathCharge(int dawnHealthPercent) {
+        if (deathChargeHandled || !config.useDeathCharge()
+                || dawnHealthPercent > config.deathChargeAtPercent()) return false;
+        boolean deathChargeUnavailable = Microbot.getVarbitValue(VarbitID.ARCEUUS_DEATH_CHARGE_ACTIVE) != 0
+                || Microbot.getVarbitValue(VarbitID.ARCEUUS_DEATH_CHARGE_COOLDOWN) != 0;
+        if (deathChargeUnavailable || !Rs2Magic.canCast(Rs2Spells.DEATH_CHARGE)) {
+            deathChargeHandled = true;
+            return false;
+        }
+        if (gameTick <= deathChargeAttemptTick) return true;
+        deathChargeAttemptTick = gameTick;
+        boolean cast = Rs2Magic.cast(Rs2Spells.DEATH_CHARGE);
+        recordAction("CAST_DEATH_CHARGE", "Dawn health=" + dawnHealthPercent + "%", cast);
+        status = cast ? "Casting Death Charge near Dawn's death" : "Retrying Death Charge";
+        if (cast) deathChargeHandled = true;
+        return true;
+    }
+
+    private boolean handleDawnSpecials(Rs2NpcModel dawn, boolean phaseThree) {
         if (!config.useDawnSpecialAttacks() || "None".equals(dawnSpecWeapon)) {
             dawnSpecDumpComplete = true;
             return false;
         }
 
         int specCost = specialAttackCost(dawnSpecWeapon);
-        int phaseLimit = phaseFour ? config.p4SpecialCount() : config.p2SpecialCount();
+        int phaseLimit = phaseThree ? config.dawnP3SpecialCount() : config.dawnP1SpecialCount();
         if (phaseLimit == 0) {
             dawnSpecDumpComplete = true;
             return false;
@@ -737,23 +754,23 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         if (waitingForSpecEnergyDrop) {
             if (specEnergy < specEnergyBeforeAttack) {
                 waitingForSpecEnergyDrop = false;
-                duskSpecialsUsedThisPhase++;
-                if (duskSpecialsUsedThisPhase >= phaseLimit || specEnergy < specCost) {
+                dawnSpecialsUsedThisPhase++;
+                if (dawnSpecialsUsedThisPhase >= phaseLimit || specEnergy < specCost) {
                     dawnSpecDumpComplete = true;
                 }
             } else if (gameTick <= specObservationDeadlineTick) {
-                status = "Waiting for Dusk special attack";
+                status = "Waiting for Dawn special attack";
                 return true;
             } else {
                 waitingForSpecEnergyDrop = false;
             }
         }
-        if (dawnSpecDumpComplete || duskSpecialsUsedThisPhase >= phaseLimit
-                || specEnergy < specCost || dusk.isDead()) {
+        if (dawnSpecDumpComplete || dawnSpecialsUsedThisPhase >= phaseLimit
+                || specEnergy < specCost || isDead(dawn)) {
             dawnSpecDumpComplete = true;
             return false;
         }
-        if (equip(dawnSpecWeapon, "", duskBody)) return true;
+        if (equip(dawnSpecWeapon, "", dawnBody)) return true;
         if (Rs2Tab.getCurrentTab() != InterfaceTab.COMBAT) {
             status = "Opening combat tab for Dawn specs";
             Rs2Tab.switchTo(InterfaceTab.COMBAT);
@@ -771,10 +788,10 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             return true;
         }
         if (gameTick - lastSpecActionTick < config.attackRetryTicks()) return true;
-        status = "Using " + dawnSpecWeapon + " spec on Dusk P" + (phaseFour ? "4" : "2")
-                + " (" + (duskSpecialsUsedThisPhase + 1) + "/" + phaseLimit + ")";
-        boolean attacked = dusk.click("Attack");
-        recordAction("ATTACK_NPC", "Dusk id=" + dusk.getId() + " special=true specArmed=true", attacked);
+        status = "Using " + dawnSpecWeapon + " spec on Dawn P" + (phaseThree ? "3" : "1")
+                + " (" + (dawnSpecialsUsedThisPhase + 1) + "/" + phaseLimit + ")";
+        boolean attacked = dawn.click("Attack");
+        recordAction("ATTACK_NPC", "Dawn id=" + dawn.getId() + " special=true specArmed=true", attacked);
         lastSpecActionTick = gameTick;
         if (attacked) {
             specEnergyBeforeAttack = specEnergy;
@@ -800,7 +817,17 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
         }
         if (config.useOffensivePrayers()) Rs2Prayer.toggle(Rs2PrayerEnum.PIETY, true);
-        if (handleDuskSpecials(dusk, phaseFour)) return;
+        if (specialAttackArmed) {
+            if (Rs2Tab.getCurrentTab() != InterfaceTab.COMBAT) {
+                status = "Opening combat tab to disarm special attack";
+                Rs2Tab.switchTo(InterfaceTab.COMBAT);
+                return;
+            }
+            status = "Disarming leftover halberd special attack";
+            boolean disarmed = Rs2Combat.setSpecState(false, 0);
+            recordAction("DISARM_SPECIAL_ATTACK", dawnSpecWeapon, disarmed);
+            return;
+        }
         String offhand = TWO_HANDED_WEAPONS.contains(duskWeapon) ? "" : duskOffhand;
         if (equip(duskWeapon, offhand, duskBody)) return;
         status = (phaseFour ? "Fighting Dusk P4 with " : "Fighting Dusk P2 with ") + duskWeapon;
@@ -809,7 +836,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
 
     private void attackOrFinish(Rs2NpcModel target) {
         if (gameTick - lastAttackTick < config.attackRetryTicks()) return;
-        if (target.isDead()) {
+        if (isDead(target)) {
             Rs2ItemModel finisherItem = Rs2Inventory.get(finisherItemId);
             net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel legacyTarget =
                     new net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel(target.getNpc());
@@ -915,14 +942,22 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         return "Stopped: trip complete";
     }
 
-    private boolean absorbSphere() {
+    private boolean handleHealingSphere() {
         Rs2TileObjectModel sphere = Microbot.getRs2TileObjectCache().query().withIds(SPHERE_IDS)
                 .within(config.sphereMaxDistance()).nearest();
-        if (sphere == null || gameTick <= lastMoveTick) return false;
-        WorldPoint location = sphere.getWorldLocation();
-        if (location == null || isDangerous(location)) return false;
+        if (sphere == null) return false;
+        if (gameTick <= lastMoveTick) return true;
+        WorldPoint location = Microbot.getClientThread().runOnClientThreadOptional(
+                sphere::getWorldLocation).orElse(null);
+        if (location == null) return true;
+        if (isDangerous(location)) {
+            status = "Waiting to safely absorb healing sphere";
+            return true;
+        }
         status = "Absorbing healing sphere";
-        Rs2Walker.walkFastCanvas(location);
+        boolean moved = Rs2Walker.walkFastCanvas(location);
+        recordAction("ABSORB_HEALING_SPHERE",
+                "target=" + location.getX() + "," + location.getY(), moved);
         lastMoveTick = gameTick;
         return true;
     }
@@ -972,6 +1007,11 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 () -> npc.getNpc().getWorldArea()).orElse(null);
     }
 
+    private boolean isDead(Rs2NpcModel npc) {
+        return npc != null && Microbot.getClientThread().runOnClientThreadOptional(
+                () -> npc.getNpc().isDead()).orElse(false);
+    }
+
     private WorldPoint findSafeTile(Rs2NpcModel dusk) {
         if (playerLocation == null) return null;
         WorldArea duskArea = getWorldArea(dusk);
@@ -1016,6 +1056,14 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private WorldPoint findPrisonExit(Rs2NpcModel dusk) {
         if (prisonCenter == null || playerLocation == null) return null;
         WorldArea duskArea = getWorldArea(dusk);
+        int[][] cardinalExits = {{-2, 0}, {2, 0}, {0, -2}, {0, 2}};
+        int firstExit = prisonEscapeAttempts % cardinalExits.length;
+        for (int index = 0; index < cardinalExits.length; index++) {
+            int[] offset = cardinalExits[(firstExit + index) % cardinalExits.length];
+            WorldPoint tile = prisonCenter.dx(offset[0]).dy(offset[1]);
+            if (isDangerous(tile) || (duskArea != null && duskArea.distanceTo(tile) < 2)) continue;
+            if (Rs2Walker.isWalkableInCollisionMap(tile)) return tile;
+        }
         List<WorldPoint> candidates = new ArrayList<>();
         for (int radius = 2; radius <= 4; radius++) {
             for (int x = -radius; x <= radius; x++) {
@@ -1064,13 +1112,10 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                            int boostedAttack, int realAttack, int boostedStrength, int realStrength) {
         gameTick = tick;
         playerLocation = location;
-        if (prisonPending && tick > prisonDetectedTick && location != null) {
-            prisonCenter = location;
-            prisonPending = false;
-        } else if (tick > prisonUntilTick) {
+        if (tick > prisonUntilTick) {
             prisonCenter = null;
             prisonOrigin = null;
-            prisonPending = false;
+            prisonEscapeAttempts = 0;
         }
         hitpoints = hp;
         maxHitpoints = Math.max(1, maxHp);
@@ -1142,12 +1187,12 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     private void detectP4Prison(String source) {
-        if (gameTick <= prisonUntilTick && (prisonPending || prisonCenter != null)) return;
+        if (playerLocation == null || (gameTick <= prisonUntilTick && prisonCenter != null)) return;
         prisonDetectedTick = gameTick;
-        prisonUntilTick = gameTick + 5;
+        prisonUntilTick = gameTick + 8;
         prisonOrigin = playerLocation;
-        prisonCenter = null;
-        prisonPending = true;
+        prisonCenter = playerLocation;
+        prisonEscapeAttempts = 0;
         lastP4PrisonTick = gameTick;
         lastP4PrisonDetectionSource = source;
     }
