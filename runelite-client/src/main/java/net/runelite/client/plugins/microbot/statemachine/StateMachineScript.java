@@ -125,6 +125,15 @@ public abstract class StateMachineScript<S extends Enum<S>> extends Script {
         return null;
     }
 
+    /**
+     * Additional JSON-friendly runtime data included in the debug snapshot.
+     * Called on the script worker while publishing, so implementations may safely
+     * read state owned by that worker. Do not block or query mutable game entities.
+     */
+    protected Map<String, Object> diagnosticSnapshot() {
+        return Collections.emptyMap();
+    }
+
     // --- Engine ---
 
     /**
@@ -263,7 +272,8 @@ public abstract class StateMachineScript<S extends Enum<S>> extends Script {
                 lastTransitionAt, stateEnteredAt,
                 loopCount, transitionCount,
                 pending,
-                new ArrayList<>(traceBuffer)
+                new ArrayList<>(traceBuffer),
+                diagnosticSnapshot()
         );
         synchronized (lifecycleLock) {
             if (initialized) {

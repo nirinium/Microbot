@@ -105,6 +105,8 @@ The **Agent Server** plugin (port 8081, localhost) must be enabled for any CLI/H
 |------|---------|
 | `scripts health` | Detect stalled scripts (heartbeat age) |
 | `GET /debug/snapshot` | State machine snapshot — current state, transitions, guard results, trace buffer |
+| `debug snapshot [script]` | Current state plus automatically published script diagnostics |
+| `debug watch [script] [--interval N]` | Continuously monitor live diagnostics until Ctrl+C |
 | `screenshot save --label debug` | Visual state capture for multimodal analysis |
 
 ---

@@ -25,6 +25,7 @@ public final class StateSnapshot<S extends Enum<S>> {
     private final long transitionCount;
     private final List<PendingTransition<S>> pendingTransitions;
     private final List<TraceEntry<S>> recentTrace;
+    private final Map<String, Object> diagnostics;
 
     public StateSnapshot(
             S currentState,
@@ -35,7 +36,8 @@ public final class StateSnapshot<S extends Enum<S>> {
             long loopCount,
             long transitionCount,
             List<PendingTransition<S>> pendingTransitions,
-            List<TraceEntry<S>> recentTrace) {
+            List<TraceEntry<S>> recentTrace,
+            Map<String, Object> diagnostics) {
         this.currentState = currentState;
         this.previousState = previousState;
         this.lastTransitionReason = lastTransitionReason;
@@ -45,6 +47,7 @@ public final class StateSnapshot<S extends Enum<S>> {
         this.transitionCount = transitionCount;
         this.pendingTransitions = Collections.unmodifiableList(pendingTransitions);
         this.recentTrace = Collections.unmodifiableList(recentTrace);
+        this.diagnostics = Collections.unmodifiableMap(new LinkedHashMap<>(diagnostics));
     }
 
     public S currentState() { return currentState; }
@@ -56,6 +59,7 @@ public final class StateSnapshot<S extends Enum<S>> {
     public long transitionCount() { return transitionCount; }
     public List<PendingTransition<S>> pendingTransitions() { return pendingTransitions; }
     public List<TraceEntry<S>> recentTrace() { return recentTrace; }
+    public Map<String, Object> diagnostics() { return diagnostics; }
 
     /**
      * Convert to a JSON-friendly map for the agent server debug endpoint.
@@ -88,6 +92,9 @@ public final class StateSnapshot<S extends Enum<S>> {
         map.put("recentTrace", recentTrace.stream()
                 .map(TraceEntry::toMap)
                 .collect(Collectors.toList()));
+        if (!diagnostics.isEmpty()) {
+            map.put("diagnostics", diagnostics);
+        }
 
         return map;
     }

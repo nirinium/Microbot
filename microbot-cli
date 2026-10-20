@@ -105,6 +105,10 @@ Scripts:
   scripts results --class <className>    Get test results
   scripts results post --class <c> --data <json>  Submit test results
 
+Debug:
+  debug snapshot [script]                 State-machine snapshot and live diagnostics
+  debug watch [script] [--interval N]     Print changed snapshots until Ctrl+C
+
 Quest Helper:
   quest-helper status                     Current selected quest helper state
   quest-helper start --name <questName>   Select/start a quest helper
@@ -731,6 +735,43 @@ case "$1" in
                 do_post "${BASE}/settings/plugin" "{\"group\":\"${escaped_group}\",\"key\":\"${escaped_key}\",\"value\":\"${escaped_value}\"}"
                 ;;
             *) echo '{"error":"Unknown plugin-config command. Use: get, set"}'; exit 1 ;;
+        esac
+        ;;
+
+    debug)
+        action="${2:-snapshot}"
+        script="${3:-}"
+        case "$action" in
+            snapshot)
+                q=$(build_query "script" "$script")
+                do_get "${BASE}/debug/snapshot${q}"
+                ;;
+            watch)
+                shift 2
+                script=""
+                interval="1"
+                if [[ $# -gt 0 ]] && [[ "$1" != --* ]]; then
+                    script="$1"
+                    shift
+                fi
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --interval) interval="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                q=$(build_query "script" "$script")
+                previous=""
+                while true; do
+                    current=$(do_get "${BASE}/debug/snapshot${q}")
+                    if [[ "$current" != "$previous" ]]; then
+                        printf '%s\n' "$current"
+                        previous="$current"
+                    fi
+                    sleep "$interval"
+                done
+                ;;
+            *) echo '{"error":"Usage: microbot-cli debug snapshot [script] | watch [script] [--interval N]"}'; exit 1 ;;
         esac
         ;;
 

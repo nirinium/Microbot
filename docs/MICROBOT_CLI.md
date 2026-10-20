@@ -314,6 +314,23 @@ A typical workflow: a contributor unsure whether their script utility needs to w
 ./microbot-cli scripts results --class "com.hub.MyPlugin"
 ```
 
+### Live Script Diagnostics
+
+State-machine scripts publish diagnostics automatically while they are running. No
+separate dashboard or recorder is required.
+
+```bash
+# Read the current state and script-specific diagnostic payload
+./microbot-cli debug snapshot GrotesqueGuardiansScript
+
+# Continuously print snapshots until Ctrl+C (one-second interval by default)
+./microbot-cli debug watch GrotesqueGuardiansScript
+./microbot-cli debug watch GrotesqueGuardiansScript --interval 2
+```
+
+The watch command is read-only. Stopping it does not stop the script or diagnostic
+collection.
+
 These endpoints are designed for the Microbot-Hub automated testing loop: the Hub spawns a client, logs in, starts a script, polls status, and collects results. See `docs/AGENT_SERVER.md` for the full HTTP API.
 
 ## Response Format
