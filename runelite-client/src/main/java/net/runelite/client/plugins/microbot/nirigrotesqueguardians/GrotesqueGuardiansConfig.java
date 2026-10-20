@@ -220,7 +220,7 @@ public interface GrotesqueGuardiansConfig extends Config {
             position = 0, section = advancedSection)
     @Range(min = 1, max = 5)
     default int attackRetryTicks() {
-        return 2;
+        return 1;
     }
 
     @ConfigItem(keyName = "gearRetryTicks", name = "Gear retry ticks",
@@ -228,7 +228,7 @@ public interface GrotesqueGuardiansConfig extends Config {
             position = 1, section = advancedSection)
     @Range(min = 1, max = 5)
     default int gearRetryTicks() {
-        return 2;
+        return 1;
     }
 
     @ConfigItem(keyName = "bellRetryTicks", name = "Bell retry ticks",

@@ -560,7 +560,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 status = "Loop failure: " + lastLoopFailure;
                 if (getSnapshot() != null) forceState(GrotesqueGuardiansState.ERROR, lastLoopFailure);
             }
-        }, 0, 200, TimeUnit.MILLISECONDS);
+        }, 0, 100, TimeUnit.MILLISECONDS);
         return true;
     }
 
@@ -856,29 +856,21 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     private boolean equip(String weapon, String offhand, String body) {
-        if (weapon != null && !weapon.isBlank() && !Rs2Equipment.isWearing(weapon, true)) {
-            if (gameTick - lastGearTick >= config.gearRetryTicks()) {
-                equipItem(weapon);
-                lastGearTick = gameTick;
-            }
-            return true;
-        }
-        if (offhand != null && !offhand.isBlank() && !Rs2Equipment.isWearing(offhand, true)) {
-            if (gameTick - lastGearTick >= config.gearRetryTicks()) {
-                equipItem(offhand);
-                lastGearTick = gameTick;
-            }
-            return true;
-        }
-        if (body != null && !body.isBlank() && !"None".equals(body)
-                && !Rs2Equipment.isWearing(body, true)) {
-            if (gameTick - lastGearTick >= config.gearRetryTicks()) {
-                equipItem(body);
-                lastGearTick = gameTick;
-            }
-            return true;
-        }
-        return false;
+        boolean weaponMissing = weapon != null && !weapon.isBlank()
+                && !Rs2Equipment.isWearing(weapon, true);
+        boolean offhandMissing = offhand != null && !offhand.isBlank()
+                && !Rs2Equipment.isWearing(offhand, true);
+        boolean bodyMissing = body != null && !body.isBlank() && !"None".equals(body)
+                && !Rs2Equipment.isWearing(body, true);
+        boolean pending = weaponMissing || offhandMissing || bodyMissing;
+        if (!pending || gameTick - lastGearTick < config.gearRetryTicks()) return pending;
+
+        boolean interacted = false;
+        if (weaponMissing) interacted |= equipItem(weapon);
+        if (offhandMissing) interacted |= equipItem(offhand);
+        if (bodyMissing) interacted |= equipItem(body);
+        if (interacted) lastGearTick = gameTick;
+        return true;
     }
 
     private boolean equipItem(String name) {
@@ -955,9 +947,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             return true;
         }
         status = "Absorbing healing sphere";
-        boolean moved = Rs2Walker.walkFastCanvas(location);
+        boolean absorbed = sphere.click("Absorb");
         recordAction("ABSORB_HEALING_SPHERE",
-                "target=" + location.getX() + "," + location.getY(), moved);
+                "target=" + location.getX() + "," + location.getY(), absorbed);
         lastMoveTick = gameTick;
         return true;
     }
