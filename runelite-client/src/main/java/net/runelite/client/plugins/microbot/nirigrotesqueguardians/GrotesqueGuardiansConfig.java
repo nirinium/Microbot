@@ -132,11 +132,11 @@ public interface GrotesqueGuardiansConfig extends Config {
     }
 
     @ConfigItem(keyName = "p4SpecialCount", name = "Dawn P3 special count",
-            description = "Maximum halberd special attacks to use on Dawn near the end of phase three",
+            description = "Maximum halberd special attacks to use immediately on Dawn in phase three",
             position = 8, section = combatSection)
     @Range(min = 0, max = 3)
     default int dawnP3SpecialCount() {
-        return 2;
+        return 3;
     }
 
     @ConfigItem(keyName = "customDawnSpecWeapon", name = "Custom Dawn spec halberd",
@@ -154,7 +154,7 @@ public interface GrotesqueGuardiansConfig extends Config {
     }
 
     @ConfigItem(keyName = "deathChargeAtPercent", name = "Death Charge at Dawn HP %",
-            description = "Cast Death Charge and begin the phase-three halberd spec dump at or below this health",
+            description = "Cast Death Charge at or below this Dawn phase-three health percentage",
             position = 11, section = combatSection)
     @Range(min = 5, max = 50)
     default int deathChargeAtPercent() {
