@@ -608,7 +608,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         boolean standingInDanger = hazards.entrySet().stream().anyMatch(entry ->
                 distance(entry.getKey(), playerLocation) <= entry.getValue().radius);
         Rs2NpcModel dusk = currentDusk();
-        WorldArea duskArea = dusk == null ? null : dusk.getWorldArea();
+        WorldArea duskArea = getWorldArea(dusk);
         boolean adjacentDuringP2Special = gameTick <= evadeUntilTick && duskArea != null
                 && duskArea.distanceTo(playerLocation) < config.p2DodgeDistance();
         boolean standingUnderDusk = duskArea != null && duskArea.contains(playerLocation);
@@ -966,9 +966,15 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 PHASE_2_IDS.contains(npc.getId()) || PHASE_4_IDS.contains(npc.getId())).nearest();
     }
 
+    private WorldArea getWorldArea(Rs2NpcModel npc) {
+        if (npc == null) return null;
+        return Microbot.getClientThread().runOnClientThreadOptional(
+                () -> npc.getNpc().getWorldArea()).orElse(null);
+    }
+
     private WorldPoint findSafeTile(Rs2NpcModel dusk) {
         if (playerLocation == null) return null;
-        WorldArea duskArea = dusk == null ? null : dusk.getWorldArea();
+        WorldArea duskArea = getWorldArea(dusk);
         List<WorldPoint> candidates = new ArrayList<>();
         for (int radius = 1; radius <= 4; radius++) {
             for (int x = -radius; x <= radius; x++) {
@@ -988,7 +994,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
 
     private WorldPoint findP2DodgeTile(Rs2NpcModel dusk) {
         if (playerLocation == null || dusk == null) return null;
-        WorldArea duskArea = dusk.getWorldArea();
+        WorldArea duskArea = getWorldArea(dusk);
         if (duskArea == null) return null;
         int currentDistance = duskArea.distanceTo(playerLocation);
         List<WorldPoint> fartherTiles = new ArrayList<>();
@@ -1009,7 +1015,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
 
     private WorldPoint findPrisonExit(Rs2NpcModel dusk) {
         if (prisonCenter == null || playerLocation == null) return null;
-        WorldArea duskArea = dusk == null ? null : dusk.getWorldArea();
+        WorldArea duskArea = getWorldArea(dusk);
         List<WorldPoint> candidates = new ArrayList<>();
         for (int radius = 2; radius <= 4; radius++) {
             for (int x = -radius; x <= radius; x++) {
