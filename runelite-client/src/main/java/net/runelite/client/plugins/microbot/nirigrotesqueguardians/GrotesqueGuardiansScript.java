@@ -224,6 +224,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile int prisonUntilTick;
     private volatile WorldPoint prisonCenter;
     private volatile WorldPoint prisonOrigin;
+    private volatile WorldPoint prisonOpening;
     private volatile int prisonDetectedTick = -1;
     private volatile boolean p4PrisonAnimationActive;
     private volatile AttackStyle lastDuskAttack = AttackStyle.MELEE;
@@ -419,6 +420,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             processedHazardObservations.clear();
             prisonCenter = null;
             prisonOrigin = null;
+            prisonOpening = null;
             prisonEscapeAttempts = 0;
         }
         if (to == GrotesqueGuardiansState.DAWN_PHASE_3) {
@@ -473,6 +475,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         encounter.put("prisonCenter", prisonCenter == null ? null
                 : prisonCenter.getX() + "," + prisonCenter.getY() + "," + prisonCenter.getPlane());
         encounter.put("prisonOrigin", pointText(prisonOrigin));
+        encounter.put("prisonOpening", pointText(prisonOpening));
         encounter.put("prisonEscapeAttempts", prisonEscapeAttempts);
         encounter.put("evading", gameTick <= evadeUntilTick);
         encounter.put("escapingPrison", gameTick <= prisonUntilTick);
@@ -620,6 +623,11 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         boolean adjacentDuringP2Special = gameTick <= evadeUntilTick && duskArea != null
                 && duskArea.distanceTo(playerLocation) < config.p2DodgeDistance();
         boolean standingUnderDusk = duskArea != null && duskArea.contains(playerLocation);
+        boolean prisonActive = gameTick <= prisonUntilTick && prisonDetectedTick >= 0;
+        if (prisonActive && prisonCenter == null) {
+            status = "Waiting for Dusk to place the prison";
+            return true;
+        }
         boolean insidePrison = gameTick <= prisonUntilTick && prisonCenter != null
                 && distance(prisonCenter, playerLocation) <= 1;
         if (insidePrison) return escapePrisonImmediately();
@@ -1044,42 +1052,37 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 .orElseGet(() -> findSafeTile(dusk));
     }
 
-    private WorldPoint findPrisonExit(Rs2NpcModel dusk) {
+    private WorldPoint findPrisonExit() {
         if (prisonCenter == null || playerLocation == null) return null;
-        WorldArea duskArea = getWorldArea(dusk);
-        int[][] cardinalExits = {{-2, 0}, {2, 0}, {0, -2}, {0, 2}};
-        int firstExit = prisonEscapeAttempts % cardinalExits.length;
-        for (int index = 0; index < cardinalExits.length; index++) {
-            int[] offset = cardinalExits[(firstExit + index) % cardinalExits.length];
-            WorldPoint tile = prisonCenter.dx(offset[0]).dy(offset[1]);
-            if (isDangerous(tile) || (duskArea != null && duskArea.distanceTo(tile) < 2)) continue;
-            if (Rs2Walker.isWalkableInCollisionMap(tile)) return tile;
-        }
-        List<WorldPoint> candidates = new ArrayList<>();
-        for (int radius = 2; radius <= 4; radius++) {
-            for (int x = -radius; x <= radius; x++) {
-                for (int y = -radius; y <= radius; y++) {
-                    if (Math.max(Math.abs(x), Math.abs(y)) != radius) continue;
-                    WorldPoint tile = prisonCenter.dx(x).dy(y);
-                    if (isDangerous(tile) || (duskArea != null && duskArea.distanceTo(tile) < 2)) continue;
-                    if (Rs2Walker.isWalkableInCollisionMap(tile)) candidates.add(tile);
-                }
-            }
-            if (!candidates.isEmpty()) break;
-        }
-        if (candidates.isEmpty()) {
-            for (int x = -1; x <= 1; x++) {
-                for (int y = -1; y <= 1; y++) {
-                    if (x == 0 && y == 0) continue;
-                    WorldPoint tile = prisonCenter.dx(x).dy(y);
-                    if (isDangerous(tile) || (duskArea != null && duskArea.contains(tile))) continue;
-                    if (Rs2Walker.isWalkableInCollisionMap(tile)) candidates.add(tile);
-                }
+        if (prisonOpening != null) return prisonOpening;
+
+        List<WorldPoint> perimeter = new ArrayList<>();
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                if (x != 0 || y != 0) perimeter.add(prisonCenter.dx(x).dy(y));
             }
         }
-        return candidates.stream()
-                .min(Comparator.comparingInt(tile -> distance(tile, playerLocation)))
-                .orElse(null);
+        List<WorldPoint> missingFlames = perimeter.stream()
+                .filter(tile -> !hasExactActiveHazard(tile))
+                .collect(Collectors.toList());
+        if (missingFlames.size() == 1) {
+            prisonOpening = missingFlames.get(0);
+            return prisonOpening;
+        }
+
+        List<WorldPoint> collisionOpenings = perimeter.stream()
+                .filter(Rs2Walker::isWalkableInCollisionMap)
+                .collect(Collectors.toList());
+        if (collisionOpenings.size() == 1) {
+            prisonOpening = collisionOpenings.get(0);
+            return prisonOpening;
+        }
+        return null;
+    }
+
+    private boolean hasExactActiveHazard(WorldPoint tile) {
+        Hazard hazard = hazards.get(tile);
+        return hazard != null && hazard.expiresAtTick >= gameTick;
     }
 
     private boolean escapePrisonImmediately() {
@@ -1087,13 +1090,17 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         try {
             if (playerLocation == null || prisonCenter == null || gameTick > prisonUntilTick
                     || distance(prisonCenter, playerLocation) > 1) return false;
-            if (lastPrisonEscapeAttemptTick == gameTick) return true;
-            lastPrisonEscapeAttemptTick = gameTick;
-            WorldPoint safe = findPrisonExit(currentDusk());
+            WorldPoint safe = findPrisonExit();
             if (safe == null) {
-                status = "Finding prison exit";
+                status = "Finding the missing prison flame";
                 return true;
             }
+            if (safe.equals(playerLocation)) {
+                status = "Standing safely in the prison opening";
+                return true;
+            }
+            if (lastPrisonEscapeAttemptTick == gameTick) return true;
+            lastPrisonEscapeAttemptTick = gameTick;
             status = "Escaping prison immediately";
             boolean moved = Rs2Walker.walkFastCanvas(safe);
             recordAction("ESCAPE_PRISON",
@@ -1143,7 +1150,15 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         if (tick > prisonUntilTick) {
             prisonCenter = null;
             prisonOrigin = null;
+            prisonOpening = null;
+            prisonDetectedTick = -1;
             prisonEscapeAttempts = 0;
+        } else if (prisonCenter == null && prisonDetectedTick >= 0
+                && tick > prisonDetectedTick && location != null) {
+            prisonCenter = location;
+            prisonOpening = null;
+            lastPrisonEscapeAttemptTick = -100;
+            queueImmediatePrisonEscape();
         }
         hitpoints = hp;
         maxHitpoints = Math.max(1, maxHp);
@@ -1215,15 +1230,15 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     private void detectP4Prison(String source) {
-        if (playerLocation == null || (gameTick <= prisonUntilTick && prisonCenter != null)) return;
+        if (playerLocation == null || gameTick <= prisonUntilTick) return;
         prisonDetectedTick = gameTick;
         prisonUntilTick = gameTick + 8;
         prisonOrigin = playerLocation;
-        prisonCenter = playerLocation;
+        prisonCenter = null;
+        prisonOpening = null;
         prisonEscapeAttempts = 0;
         lastP4PrisonTick = gameTick;
         lastP4PrisonDetectionSource = source;
-        queueImmediatePrisonEscape();
     }
 
     private void pollTileHazards() {
