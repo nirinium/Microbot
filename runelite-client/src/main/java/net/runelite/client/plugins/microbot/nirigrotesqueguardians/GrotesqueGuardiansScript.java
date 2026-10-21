@@ -35,6 +35,7 @@ import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -160,6 +161,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     );
     private static final int P2_MINIMUM_SAFE_DISTANCE = 2;
     private static final int P4_PRISON_ESCAPE_TICKS = 5;
+    private static final Set<Integer> PRISON_GRAPHICS = Set.of(
+            SpotanimID.GG_DUSK_LIGHTNING_ENRAGED, SpotanimID.GG_DUSK_LIGHTNING_ENRAGED_START
+    );
 
     private enum AttackStyle { MELEE, RANGED }
 
@@ -232,6 +236,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private volatile WorldPoint prisonCenter;
     private volatile WorldPoint prisonOrigin;
     private volatile WorldPoint prisonOpening;
+    private volatile Set<WorldPoint> prisonFlames = Set.of();
+    private volatile boolean prisonFlamesObserved;
+    private volatile int prisonFlamesLastSeenTick = -1;
     private volatile int prisonDetectedTick = -1;
     private volatile boolean p4PrisonAnimationActive;
     private volatile AttackStyle lastDuskAttack = AttackStyle.MELEE;
@@ -429,6 +436,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             prisonCenter = null;
             prisonOrigin = null;
             prisonOpening = null;
+            prisonFlames = Set.of();
+            prisonFlamesObserved = false;
+            prisonDetectedTick = -1;
             prisonEscapeAttempts = 0;
         }
         if (to == GrotesqueGuardiansState.DAWN_PHASE_3) {
@@ -488,9 +498,12 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         encounter.put("prisonOrigin", pointText(prisonOrigin));
         encounter.put("prisonOpening", pointText(prisonOpening));
         encounter.put("prisonEscapeAttempts", prisonEscapeAttempts);
+        encounter.put("pluginVersion", GrotesqueGuardiansPlugin.VERSION);
+        encounter.put("prisonFlameCount", prisonFlames.size());
+        encounter.put("prisonFlamesObserved", prisonFlamesObserved);
         encounter.put("prisonTicksRemaining", Math.max(0, prisonUntilTick - gameTick));
         encounter.put("evading", gameTick <= evadeUntilTick);
-        encounter.put("escapingPrison", gameTick <= prisonUntilTick);
+        encounter.put("escapingPrison", isPrisonActive());
         encounter.put("dawnSpecialsUsedThisPhase", dawnSpecialsUsedThisPhase);
         encounter.put("waitingForSpecEnergyDrop", waitingForSpecEnergyDrop);
         encounter.put("specialAttackArmed", specialAttackArmed);
@@ -628,6 +641,11 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
 
     private boolean handleImmediateSafety() {
         if (playerLocation == null) return false;
+        if (isPrisonActive()) {
+            if (prisonCenter != null) return escapePrisonImmediately();
+            status = "Waiting for the prison flames";
+            return true;
+        }
         boolean standingInDanger = hazards.entrySet().stream().anyMatch(entry ->
                 distance(entry.getKey(), playerLocation) <= entry.getValue().radius);
         Rs2NpcModel dusk = currentDusk();
@@ -635,14 +653,6 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         boolean adjacentDuringP2Special = gameTick <= evadeUntilTick && duskArea != null
                 && duskArea.distanceTo(playerLocation) < p2SafeDistance();
         boolean standingUnderDusk = duskArea != null && duskArea.contains(playerLocation);
-        boolean prisonActive = gameTick <= prisonUntilTick && prisonDetectedTick >= 0;
-        if (prisonActive && prisonCenter == null) {
-            status = "Waiting for Dusk to place the prison";
-            return true;
-        }
-        boolean insidePrison = gameTick <= prisonUntilTick && prisonCenter != null
-                && distance(prisonCenter, playerLocation) <= 1;
-        if (insidePrison) return escapePrisonImmediately();
         if (adjacentDuringP2Special) return dodgeP2ShockwaveImmediately();
         if (standingInDanger || standingUnderDusk) {
             WorldPoint safe = findSafeTile(dusk);
@@ -656,29 +666,43 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 return moved;
             }
         }
-        if (gameTick - lastSupplyTick >= 3 && hitpoints * 100 / maxHitpoints <= config.eatAtPercent()) {
-            List<Rs2ItemModel> food = Rs2Inventory.getInventoryFood();
-            if (!food.isEmpty() && Rs2Inventory.interact(food.get(0), "Eat")) {
-                status = "Eating";
-                lastSupplyTick = gameTick;
-                return true;
-            }
-            Rs2ItemModel brew = Rs2Inventory.get("Saradomin brew");
-            if (brew != null && Rs2Inventory.interact(brew, "Drink")) {
-                status = "Drinking Saradomin brew";
-                brewRestorePending = true;
-                lastSupplyTick = gameTick;
-                return true;
-            }
+        GrotesqueGuardiansBrews.Action pending = brewSequence.pendingAction();
+        if (pending != GrotesqueGuardiansBrews.Action.NONE) {
+            brewSequence.observe(potionDoses(potionName(pending)), gameTick);
         }
-        if (brewRestorePending && gameTick - lastSupplyTick >= 3) {
-            if (Rs2Inventory.interact("Super restore", "Drink")) {
-                status = "Restoring stats after Saradomin brew";
-                brewRestorePending = false;
-                lastSupplyTick = gameTick;
-                return true;
+        boolean lowHp = hitpoints * 100 / maxHitpoints <= config.eatAtPercent();
+        if (gameTick - lastSupplyTick >= 3) {
+            if (!brewSequence.active() && lowHp) {
+                List<Rs2ItemModel> food = Rs2Inventory.getInventoryFood();
+                if (!food.isEmpty() && Rs2Inventory.interact(food.get(0), "Eat")) {
+                    status = "Eating";
+                    lastSupplyTick = gameTick;
+                    return true;
+                }
             }
-            if (!Rs2Inventory.hasItem("Super restore")) brewRestorePending = false;
+            boolean statsDrained = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+                for (net.runelite.api.Skill skill : new net.runelite.api.Skill[]{
+                        net.runelite.api.Skill.ATTACK, net.runelite.api.Skill.STRENGTH,
+                        net.runelite.api.Skill.RANGED, net.runelite.api.Skill.MAGIC}) {
+                    if (Microbot.getClient().getBoostedSkillLevel(skill)
+                            < Microbot.getClient().getRealSkillLevel(skill)) return true;
+                }
+                return false;
+            }).orElse(true);
+            GrotesqueGuardiansBrews.Action action = brewSequence.next(hitpoints, maxHitpoints, lowHp,
+                    potionDoses("Saradomin brew") > 0, potionDoses("Super restore") > 0,
+                    statsDrained, config.useCombatPotions(), potionDoses("Super combat potion") > 0);
+            if (action != GrotesqueGuardiansBrews.Action.NONE) {
+                String potion = potionName(action);
+                int doses = potionDoses(potion);
+                boolean clicked = Rs2Inventory.interact(potion, "Drink");
+                lastSupplyTick = gameTick;
+                if (clicked) {
+                    brewSequence.requested(action, doses, gameTick);
+                    status = "Drinking " + potion + " (brew recovery)";
+                    return true;
+                }
+            }
         }
         if (gameTick - lastSupplyTick >= 3 && prayer * 100 / maxPrayer <= config.drinkPrayerAtPercent()
                 && Rs2Player.drinkPrayerPotion()) {
@@ -848,6 +872,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     private void attackOrFinish(Rs2NpcModel target) {
+        if (isPrisonActive()) return;
         if (gameTick - lastAttackTick < config.attackRetryTicks()) return;
         if (isDead(target)) {
             Rs2ItemModel finisherItem = Rs2Inventory.get(finisherItemId);
@@ -863,6 +888,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             }
             return;
         }
+        if (isPrisonActive()) return;
         boolean attacked = target.click("Attack");
         recordAction("ATTACK_NPC", "targetId=" + target.getId(), attacked);
         lastAttackTick = gameTick;
@@ -1107,49 +1133,31 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
 
     private WorldPoint findPrisonExit() {
         if (prisonCenter == null || playerLocation == null) return null;
-        if (prisonOpening != null) return prisonOpening;
-
-        List<WorldPoint> perimeter = new ArrayList<>();
-        for (int x = -1; x <= 1; x++) {
-            for (int y = -1; y <= 1; y++) {
-                if (x != 0 || y != 0) perimeter.add(prisonCenter.dx(x).dy(y));
-            }
-        }
-        List<WorldPoint> missingFlames = perimeter.stream()
-                .filter(tile -> !hasExactActiveHazard(tile))
-                .collect(Collectors.toList());
-        if (missingFlames.size() == 1) {
-            prisonOpening = missingFlames.get(0);
-            return prisonOpening;
-        }
-
-        List<WorldPoint> collisionOpenings = perimeter.stream()
-                .filter(Rs2Walker::isWalkableInCollisionMap)
-                .collect(Collectors.toList());
-        if (collisionOpenings.size() == 1) {
-            prisonOpening = collisionOpenings.get(0);
-            return prisonOpening;
-        }
-        return null;
+        WorldPoint opening = GrotesqueGuardiansPrison.findOpening(prisonCenter, prisonFlames);
+        if (opening != null) prisonOpening = opening;
+        return prisonOpening;
     }
 
-    private boolean hasExactActiveHazard(WorldPoint tile) {
-        Hazard hazard = hazards.get(tile);
-        return hazard != null && hazard.expiresAtTick >= gameTick;
+    private boolean isPrisonActive() {
+        return prisonDetectedTick >= 0 && (gameTick <= prisonUntilTick || prisonFlamesObserved);
     }
 
     private boolean escapePrisonImmediately() {
         if (!prisonEscapeInProgress.compareAndSet(false, true)) return true;
         try {
-            if (playerLocation == null || prisonCenter == null || gameTick > prisonUntilTick
-                    || distance(prisonCenter, playerLocation) > 1) return false;
+            if (!isPrisonActive()) return false;
+            if (playerLocation == null || prisonCenter == null) return true;
+            if (distance(prisonCenter, playerLocation) > GrotesqueGuardiansPrison.RADIUS) {
+                status = "Outside prison; waiting for flames to disappear";
+                return true;
+            }
             WorldPoint safe = findPrisonExit();
             if (safe == null) {
                 status = "Finding the missing prison flame";
                 return true;
             }
             if (safe.equals(playerLocation)) {
-                status = "Standing safely in the prison opening";
+                status = "Holding prison opening until flames disappear";
                 return true;
             }
             if (lastPrisonEscapeAttemptTick == gameTick) return true;
@@ -1218,15 +1226,12 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                            int boostedAttack, int realAttack, int boostedStrength, int realStrength) {
         gameTick = tick;
         playerLocation = location;
-        if (tick > prisonUntilTick) {
+        if (tick > prisonUntilTick && !prisonFlamesObserved) {
             prisonCenter = null;
             prisonOrigin = null;
             prisonOpening = null;
             prisonDetectedTick = -1;
             prisonEscapeAttempts = 0;
-        } else if (prisonCenter == null && prisonDetectedTick >= 0
-                && tick > prisonDetectedTick && location != null && !location.equals(prisonOrigin)) {
-            capturePrisonCenter(location);
         }
         hitpoints = hp;
         maxHitpoints = Math.max(1, maxHp);
@@ -1240,11 +1245,46 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     public void onClientTick(WorldPoint location) {
-        if (location == null || prisonCenter != null || prisonDetectedTick < 0
-                || gameTick > prisonUntilTick || !p4PrisonAnimationActive
-                || location.equals(prisonOrigin)) return;
+        if (!isRunning() || location == null || !isPrisonActive()) return;
         playerLocation = location;
+        Set<WorldPoint> flames = new HashSet<>();
+        for (GraphicsObject graphics : Microbot.getClient().getTopLevelWorldView().getGraphicsObjects()) {
+            if (!PRISON_GRAPHICS.contains(graphics.getId()) || graphics.finished()) continue;
+            WorldPoint flame = WorldPoint.fromLocal(Microbot.getClient(), graphics.getLocation());
+            if (flame != null && flame.getPlane() == location.getPlane() && distance(flame, location) <= 6) {
+                flames.add(flame);
+            }
+        }
+        prisonFlames = Set.copyOf(flames);
+        if (!flames.isEmpty()) {
+            prisonFlamesObserved = true;
+            prisonFlamesLastSeenTick = gameTick;
+        } else if (prisonFlamesObserved && gameTick > prisonFlamesLastSeenTick) {
+            prisonDetectedTick = -1;
+            prisonCenter = null;
+            prisonOpening = null;
+            prisonFlamesObserved = false;
+            status = "Prison flames cleared; resuming combat";
+            return;
+        }
+        WorldPoint center = GrotesqueGuardiansPrison.findCenter(location, prisonFlames);
+        if (center != null && !center.equals(prisonCenter)) capturePrisonCenter(center);
+        if (findPrisonExit() != null) queueImmediatePrisonEscape();
+    }
+
+    public void onPlayerOverheadText(String text, WorldPoint location) {
+        if (!isRunning() || location == null || !GrotesqueGuardiansPrison.matchesCry(text)) return;
+        boolean duskPresent = Microbot.getRs2NpcCache().query()
+                .withIds(NpcID.GARGBOSS_DUSK_PHASE4_SPAWN, NpcID.GARGBOSS_DUSK_PHASE4).first() != null;
+        if (!duskPresent) return;
+        playerLocation = location;
+        if (!isPrisonActive()) detectP4Prison("playerOverheadText");
+        prisonDetectedTick = gameTick;
+        prisonUntilTick = gameTick + P4_PRISON_ESCAPE_TICKS;
+        lastP4PrisonDetectionSource = "playerOverheadText";
+        lastP4PrisonTick = gameTick;
         capturePrisonCenter(location);
+        onClientTick(location);
     }
 
     private void capturePrisonCenter(WorldPoint location) {
@@ -1314,12 +1354,15 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     }
 
     private void detectP4Prison(String source) {
-        if (playerLocation == null || gameTick <= prisonUntilTick) return;
+        if (playerLocation == null || isPrisonActive()) return;
         prisonDetectedTick = gameTick;
         prisonUntilTick = gameTick + P4_PRISON_ESCAPE_TICKS;
         prisonOrigin = playerLocation;
         prisonCenter = null;
         prisonOpening = null;
+        prisonFlames = Set.of();
+        prisonFlamesObserved = false;
+        prisonFlamesLastSeenTick = -1;
         prisonEscapeAttempts = 0;
         lastP4PrisonTick = gameTick;
         lastP4PrisonDetectionSource = source;
@@ -1362,27 +1405,12 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         }
         lastGraphicsId = observation.id;
         lastGraphicsLocation = observation.location;
+        if (PRISON_GRAPHICS.contains(observation.id)) return;
         if (LIGHTNING_GRAPHICS.contains(observation.id)) {
             hazards.put(location, new Hazard(1, gameTick + config.lightningAvoidTicks()));
-            if (isActivePrisonPerimeter(location) && activePrisonFlameCount() >= 7) {
-                queueImmediatePrisonEscape();
-            }
         } else if (DEBRIS_GRAPHICS.contains(observation.id)) {
             hazards.put(location, new Hazard(1, gameTick + config.debrisAvoidTicks()));
         }
-    }
-
-    private boolean isActivePrisonPerimeter(WorldPoint location) {
-        return location != null && prisonCenter != null && gameTick <= prisonUntilTick
-                && location.getPlane() == prisonCenter.getPlane()
-                && distance(location, prisonCenter) == 1;
-    }
-
-    private long activePrisonFlameCount() {
-        return hazards.entrySet().stream()
-                .filter(entry -> entry.getValue().expiresAtTick >= gameTick)
-                .filter(entry -> isActivePrisonPerimeter(entry.getKey()))
-                .count();
     }
 
     public void onGraphicsObject(int id, WorldPoint location, int startCycle) {
@@ -1428,6 +1456,11 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         hazards.clear();
         processedHazardObservations.clear();
         super.shutdown();
+        prisonDetectedTick = -1;
+        prisonFlames = Set.of();
+        prisonFlamesObserved = false;
+        prisonCenter = null;
+        prisonOpening = null;
         displayState = GrotesqueGuardiansState.IDLE;
         status = "Stopped";
     }

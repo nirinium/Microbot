@@ -14,6 +14,7 @@ import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GraphicsObjectCreated;
 import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.OverheadTextChanged;
 import net.runelite.api.events.ProjectileMoved;
 import net.runelite.api.gameval.NpcID;
 import net.runelite.client.config.ConfigManager;
@@ -37,7 +38,7 @@ import java.awt.GraphicsEnvironment;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class GrotesqueGuardiansPlugin extends Plugin {
-    public static final String VERSION = "0.7.12";
+    public static final String VERSION = "0.7.13";
 
     @Inject
     private Client client;
@@ -109,6 +110,13 @@ public class GrotesqueGuardiansPlugin extends Plugin {
     public void onClientTick(ClientTick event) {
         if (client.getLocalPlayer() != null) {
             script.onClientTick(client.getLocalPlayer().getWorldLocation());
+        }
+    }
+
+    @Subscribe
+    public void onOverheadTextChanged(OverheadTextChanged event) {
+        if (event.getActor() == client.getLocalPlayer()) {
+            script.onPlayerOverheadText(event.getOverheadText(), event.getActor().getWorldLocation());
         }
     }
 
