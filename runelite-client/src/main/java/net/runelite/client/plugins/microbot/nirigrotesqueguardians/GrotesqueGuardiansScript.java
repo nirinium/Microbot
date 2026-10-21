@@ -156,6 +156,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             SpotanimID.GG_FALLING_PROJECTILE, SpotanimID.GARGBOSS_EXPLODING_PROJECTILE
     );
     private static final int P2_MINIMUM_SAFE_DISTANCE = 2;
+    private static final int P4_PRISON_ESCAPE_TICKS = 5;
 
     private enum AttackStyle { MELEE, RANGED }
 
@@ -431,6 +432,9 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             deathChargeHandled = false;
             deathChargeAttemptTick = -100;
         }
+        if (to == GrotesqueGuardiansState.DUSK_PHASE_4 && gameTick > prisonUntilTick) {
+            detectP4Prison("phase4Transition");
+        }
         if (to == GrotesqueGuardiansState.DAWN_PHASE_1
                 || to == GrotesqueGuardiansState.DAWN_PHASE_3) {
             dawnSpecDumpComplete = false;
@@ -481,6 +485,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         encounter.put("prisonOrigin", pointText(prisonOrigin));
         encounter.put("prisonOpening", pointText(prisonOpening));
         encounter.put("prisonEscapeAttempts", prisonEscapeAttempts);
+        encounter.put("prisonTicksRemaining", Math.max(0, prisonUntilTick - gameTick));
         encounter.put("evading", gameTick <= evadeUntilTick);
         encounter.put("escapingPrison", gameTick <= prisonUntilTick);
         encounter.put("dawnSpecialsUsedThisPhase", dawnSpecialsUsedThisPhase);
@@ -1278,7 +1283,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private void detectP4Prison(String source) {
         if (playerLocation == null || gameTick <= prisonUntilTick) return;
         prisonDetectedTick = gameTick;
-        prisonUntilTick = gameTick + 8;
+        prisonUntilTick = gameTick + P4_PRISON_ESCAPE_TICKS;
         prisonOrigin = playerLocation;
         prisonCenter = null;
         prisonOpening = null;
