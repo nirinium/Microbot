@@ -3,7 +3,10 @@ package net.runelite.client.plugins.microbot.nirigrotesqueguardians;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.GraphicsObject;
+import net.runelite.api.Perspective;
+import net.runelite.api.Point;
 import net.runelite.api.Projectile;
+import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.AnimationID;
@@ -645,7 +648,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             WorldPoint safe = findSafeTile(dusk);
             if (safe != null && gameTick > lastMoveTick) {
                 status = standingUnderDusk ? "Moving out from under Dusk" : "Dodging tile hazard";
-                boolean moved = Rs2Walker.walkFastCanvas(safe);
+                boolean moved = walkEmergencySceneTile(safe);
                 String action = standingUnderDusk ? "DODGE_DUSK_TRAMPLE" : "DODGE_HAZARD";
                 recordAction(action,
                         "target=" + safe.getX() + "," + safe.getY(), moved);
@@ -1078,7 +1081,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             if (lastP2DodgeAttemptTick == gameTick) return true;
             lastP2DodgeAttemptTick = gameTick;
             status = "Escaping Dusk's shockwave to distance " + p2SafeDistance();
-            boolean moved = Rs2Walker.walkFastCanvas(safe);
+            boolean moved = walkEmergencySceneTile(safe);
             recordAction("DODGE_P2_BLINDING_ATTACK",
                     "target=" + safe.getX() + "," + safe.getY()
                             + " duskDistance=" + duskArea.distanceTo(safe), moved);
@@ -1152,7 +1155,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             if (lastPrisonEscapeAttemptTick == gameTick) return true;
             lastPrisonEscapeAttemptTick = gameTick;
             status = "Escaping prison immediately";
-            boolean moved = Rs2Walker.walkFastCanvas(safe);
+            boolean moved = walkEmergencySceneTile(safe);
             recordAction("ESCAPE_PRISON",
                     "target=" + safe.getX() + "," + safe.getY(), moved);
             prisonEscapeAttempts++;
@@ -1174,6 +1177,24 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                 prisonEscapeQueued.set(false);
             }
         });
+    }
+
+    /**
+     * Issues only a direct scene click for short, time-critical combat movement.
+     * Generic walking may fall back to template coordinates inside an instance,
+     * which can turn a nearby dodge into an unrelated minimap/pathfinder click.
+     */
+    private boolean walkEmergencySceneTile(WorldPoint target) {
+        if (target == null) return false;
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            LocalPoint local = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), target);
+            if (local == null) return false;
+            Point canvas = Perspective.localToCanvas(Microbot.getClient(), local,
+                    Microbot.getClient().getTopLevelWorldView().getPlane());
+            if (canvas == null) return false;
+            Rs2Walker.walkFastLocal(local);
+            return true;
+        }).orElse(false);
     }
 
     private boolean isDangerous(WorldPoint tile) {
@@ -1204,11 +1225,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
             prisonDetectedTick = -1;
             prisonEscapeAttempts = 0;
         } else if (prisonCenter == null && prisonDetectedTick >= 0
-                && tick > prisonDetectedTick && location != null) {
-            prisonCenter = location;
-            prisonOpening = null;
-            lastPrisonEscapeAttemptTick = -100;
-            queueImmediatePrisonEscape();
+                && tick > prisonDetectedTick && location != null && !location.equals(prisonOrigin)) {
+            capturePrisonCenter(location);
         }
         hitpoints = hp;
         maxHitpoints = Math.max(1, maxHp);
@@ -1219,6 +1237,21 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         this.boostedStrength = boostedStrength;
         this.realStrength = realStrength;
         playerDead = hp <= 0;
+    }
+
+    public void onClientTick(WorldPoint location) {
+        if (location == null || prisonCenter != null || prisonDetectedTick < 0
+                || gameTick > prisonUntilTick || !p4PrisonAnimationActive
+                || location.equals(prisonOrigin)) return;
+        playerLocation = location;
+        capturePrisonCenter(location);
+    }
+
+    private void capturePrisonCenter(WorldPoint location) {
+        prisonCenter = location;
+        prisonOpening = null;
+        lastPrisonEscapeAttemptTick = -100;
+        queueImmediatePrisonEscape();
     }
 
     public void onBossAnimation(int npcId, int animation, WorldPoint location) {
@@ -1331,9 +1364,25 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         lastGraphicsLocation = observation.location;
         if (LIGHTNING_GRAPHICS.contains(observation.id)) {
             hazards.put(location, new Hazard(1, gameTick + config.lightningAvoidTicks()));
+            if (isActivePrisonPerimeter(location) && activePrisonFlameCount() >= 7) {
+                queueImmediatePrisonEscape();
+            }
         } else if (DEBRIS_GRAPHICS.contains(observation.id)) {
             hazards.put(location, new Hazard(1, gameTick + config.debrisAvoidTicks()));
         }
+    }
+
+    private boolean isActivePrisonPerimeter(WorldPoint location) {
+        return location != null && prisonCenter != null && gameTick <= prisonUntilTick
+                && location.getPlane() == prisonCenter.getPlane()
+                && distance(location, prisonCenter) == 1;
+    }
+
+    private long activePrisonFlameCount() {
+        return hazards.entrySet().stream()
+                .filter(entry -> entry.getValue().expiresAtTick >= gameTick)
+                .filter(entry -> isActivePrisonPerimeter(entry.getKey()))
+                .count();
     }
 
     public void onGraphicsObject(int id, WorldPoint location, int startCycle) {

@@ -10,6 +10,7 @@ import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.AnimationChanged;
+import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GraphicsObjectCreated;
 import net.runelite.api.events.NpcDespawned;
@@ -36,7 +37,7 @@ import java.awt.GraphicsEnvironment;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class GrotesqueGuardiansPlugin extends Plugin {
-    public static final String VERSION = "0.7.11";
+    public static final String VERSION = "0.7.12";
 
     @Inject
     private Client client;
@@ -102,6 +103,13 @@ public class GrotesqueGuardiansPlugin extends Plugin {
                 client.getBoostedSkillLevel(Skill.PRAYER), client.getRealSkillLevel(Skill.PRAYER),
                 client.getBoostedSkillLevel(Skill.ATTACK), client.getRealSkillLevel(Skill.ATTACK),
                 client.getBoostedSkillLevel(Skill.STRENGTH), client.getRealSkillLevel(Skill.STRENGTH));
+    }
+
+    @Subscribe
+    public void onClientTick(ClientTick event) {
+        if (client.getLocalPlayer() != null) {
+            script.onClientTick(client.getLocalPlayer().getWorldLocation());
+        }
     }
 
     @Subscribe
