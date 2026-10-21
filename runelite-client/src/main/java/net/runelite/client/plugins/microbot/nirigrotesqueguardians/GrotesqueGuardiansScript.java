@@ -155,6 +155,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private static final Set<Integer> STONE_BALL_PROJECTILES = Set.of(
             SpotanimID.GG_FALLING_PROJECTILE, SpotanimID.GARGBOSS_EXPLODING_PROJECTILE
     );
+    private static final int P2_MINIMUM_SAFE_DISTANCE = 2;
 
     private enum AttackStyle { MELEE, RANGED }
 
@@ -185,6 +186,8 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private GrotesqueGuardiansConfig config;
     private final Map<WorldPoint, Hazard> hazards = new ConcurrentHashMap<>();
     private final Set<String> processedHazardObservations = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean p2DodgeQueued = new AtomicBoolean();
+    private final AtomicBoolean p2DodgeInProgress = new AtomicBoolean();
     private final AtomicBoolean prisonEscapeQueued = new AtomicBoolean();
     private final AtomicBoolean prisonEscapeInProgress = new AtomicBoolean();
     @Getter
@@ -243,6 +246,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
     private int specObservationDeadlineTick;
     private int specArmRequestedTick = -100;
     private int lastSpecActionTick = -100;
+    private volatile int lastP2DodgeAttemptTick = -100;
 
     // Refreshed immediately before step(); transition guards only read these fields.
     private boolean phase1Present;
@@ -621,7 +625,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         Rs2NpcModel dusk = currentDusk();
         WorldArea duskArea = getWorldArea(dusk);
         boolean adjacentDuringP2Special = gameTick <= evadeUntilTick && duskArea != null
-                && duskArea.distanceTo(playerLocation) < config.p2DodgeDistance();
+                && duskArea.distanceTo(playerLocation) < p2SafeDistance();
         boolean standingUnderDusk = duskArea != null && duskArea.contains(playerLocation);
         boolean prisonActive = gameTick <= prisonUntilTick && prisonDetectedTick >= 0;
         if (prisonActive && prisonCenter == null) {
@@ -631,19 +635,13 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         boolean insidePrison = gameTick <= prisonUntilTick && prisonCenter != null
                 && distance(prisonCenter, playerLocation) <= 1;
         if (insidePrison) return escapePrisonImmediately();
-        if (standingInDanger || adjacentDuringP2Special || standingUnderDusk) {
-            WorldPoint safe;
-            if (adjacentDuringP2Special) {
-                safe = findP2DodgeTile(dusk);
-            } else {
-                safe = findSafeTile(dusk);
-            }
+        if (adjacentDuringP2Special) return dodgeP2ShockwaveImmediately();
+        if (standingInDanger || standingUnderDusk) {
+            WorldPoint safe = findSafeTile(dusk);
             if (safe != null && gameTick > lastMoveTick) {
-                status = adjacentDuringP2Special ? "Stepping away from Dusk's blinding attack"
-                        : standingUnderDusk ? "Moving out from under Dusk" : "Dodging tile hazard";
+                status = standingUnderDusk ? "Moving out from under Dusk" : "Dodging tile hazard";
                 boolean moved = Rs2Walker.walkFastCanvas(safe);
-                String action = adjacentDuringP2Special ? "DODGE_P2_BLINDING_ATTACK"
-                        : standingUnderDusk ? "DODGE_DUSK_TRAMPLE" : "DODGE_HAZARD";
+                String action = standingUnderDusk ? "DODGE_DUSK_TRAMPLE" : "DODGE_HAZARD";
                 recordAction(action,
                         "target=" + safe.getX() + "," + safe.getY(), moved);
                 lastMoveTick = gameTick;
@@ -1022,7 +1020,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
                     WorldPoint tile = playerLocation.dx(x).dy(y);
                     if (isDangerous(tile) || (duskArea != null && duskArea.contains(tile))) continue;
                     if (gameTick <= evadeUntilTick && duskArea != null
-                            && duskArea.distanceTo(tile) < config.p2DodgeDistance()) continue;
+                            && duskArea.distanceTo(tile) < p2SafeDistance()) continue;
                     if (Rs2Walker.isWalkableInCollisionMap(tile)) candidates.add(tile);
                 }
             }
@@ -1035,21 +1033,68 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         if (playerLocation == null || dusk == null) return null;
         WorldArea duskArea = getWorldArea(dusk);
         if (duskArea == null) return null;
-        int currentDistance = duskArea.distanceTo(playerLocation);
-        List<WorldPoint> fartherTiles = new ArrayList<>();
-        for (int x = -1; x <= 1; x++) {
-            for (int y = -1; y <= 1; y++) {
-                if (x == 0 && y == 0) continue;
-                WorldPoint tile = playerLocation.dx(x).dy(y);
-                if (isDangerous(tile) || duskArea.contains(tile)
-                        || duskArea.distanceTo(tile) <= currentDistance
-                        || !Rs2Walker.isWalkableInCollisionMap(tile)) continue;
-                fartherTiles.add(tile);
+        int safeDistance = p2SafeDistance();
+        for (int radius = 1; radius <= 6; radius++) {
+            List<WorldPoint> safeTiles = new ArrayList<>();
+            for (int x = -radius; x <= radius; x++) {
+                for (int y = -radius; y <= radius; y++) {
+                    if (Math.max(Math.abs(x), Math.abs(y)) != radius) continue;
+                    WorldPoint tile = playerLocation.dx(x).dy(y);
+                    if (isDangerous(tile) || duskArea.distanceTo(tile) < safeDistance
+                            || !Rs2Walker.isWalkableInCollisionMap(tile)) continue;
+                    safeTiles.add(tile);
+                }
+            }
+            if (!safeTiles.isEmpty()) {
+                return safeTiles.stream()
+                        .min(Comparator.comparingInt(duskArea::distanceTo))
+                        .orElse(null);
             }
         }
-        return fartherTiles.stream()
-                .max(Comparator.comparingInt(duskArea::distanceTo))
-                .orElseGet(() -> findSafeTile(dusk));
+        return null;
+    }
+
+    private int p2SafeDistance() {
+        return Math.max(P2_MINIMUM_SAFE_DISTANCE, config.p2DodgeDistance());
+    }
+
+    private boolean dodgeP2ShockwaveImmediately() {
+        if (!p2DodgeInProgress.compareAndSet(false, true)) return true;
+        try {
+            Rs2NpcModel dusk = currentDusk();
+            WorldArea duskArea = getWorldArea(dusk);
+            if (playerLocation == null || duskArea == null || gameTick > evadeUntilTick
+                    || duskArea.distanceTo(playerLocation) >= p2SafeDistance()) return false;
+            WorldPoint safe = findP2DodgeTile(dusk);
+            if (safe == null) {
+                status = "Finding minimum safe distance from Dusk";
+                return true;
+            }
+            if (lastP2DodgeAttemptTick == gameTick) return true;
+            lastP2DodgeAttemptTick = gameTick;
+            status = "Escaping Dusk's shockwave to distance " + p2SafeDistance();
+            boolean moved = Rs2Walker.walkFastCanvas(safe);
+            recordAction("DODGE_P2_BLINDING_ATTACK",
+                    "target=" + safe.getX() + "," + safe.getY()
+                            + " duskDistance=" + duskArea.distanceTo(safe), moved);
+            lastMoveTick = gameTick;
+            return true;
+        } finally {
+            p2DodgeInProgress.set(false);
+        }
+    }
+
+    private void queueImmediateP2Dodge() {
+        if (!isRunning() || !p2DodgeQueued.compareAndSet(false, true)) return;
+        scheduledExecutorService.execute(() -> {
+            try {
+                if (Microbot.isLoggedIn()) dodgeP2ShockwaveImmediately();
+            } catch (Exception exception) {
+                log.warn("Immediate P2 shockwave dodge failed: {}", exception.getMessage());
+            } finally {
+                p2DodgeQueued.set(false);
+            }
+        });
     }
 
     private WorldPoint findPrisonExit() {
@@ -1207,6 +1252,7 @@ public class GrotesqueGuardiansScript extends StateMachineScript<GrotesqueGuardi
         if (lastP2SpecialTick != gameTick) {
             lastP2SpecialTick = gameTick;
             lastP2SpecialDetectionSource = source;
+            queueImmediateP2Dodge();
         }
     }
 
