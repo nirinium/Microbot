@@ -23,6 +23,12 @@ Route camera turns only for unreachable targets: [movement gotcha 23](movement.m
 
 Instance interaction recovery must use scene-local movement: [movement gotcha 24](movement.md#24-recover-interactions-in-an-instance-using-scene-local-movement).
 
+Instance dodge candidates must use live scene collision: [movement gotcha 29](movement.md#29-choose-instance-dodge-tiles-from-live-scene-collision-not-the-global-map).
+
+Overlapping hazards must share an emergency movement arbiter: [movement gotcha 30](movement.md#30-replan-an-emergency-walk-when-another-hazard-invalidates-its-path).
+
+Instanced NPC interaction recovery must stay scene-local: [movement gotcha 31](movement.md#31-recover-instanced-npc-interactions-in-scene-local-coordinates).
+
 Camera turns wait for the yaw to settle before returning: [movement gotcha 25](movement.md#25-a-camera-turn-is-finished-only-when-the-yaw-stops-changing).
 
 Scene tile loops on a boat worldview must use the tile array bounds: [movement gotcha 26](movement.md#26-bound-scene-tile-loops-by-the-tile-array-not-constantsscene_size).

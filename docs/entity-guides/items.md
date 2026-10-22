@@ -288,6 +288,14 @@ While a shop, bank, deposit box or Grand Exchange inventory is open or rebuildin
 **Defensive check:** Run `Rs2InventoryInvokeMenuTest`.
 
 
+## 18. Inventory-space recovery needs observed slots and whole-stack values
+
+Eating multi-bite food can replace an item in place without freeing a slot. A successful interaction dispatch is not proof that inventory space opened. Request one action, recheck `Rs2Inventory.emptySlotCount()` on later loop iterations, and keep emergency movement ahead of recovery. Bound retries so repeated full-inventory chat cannot trigger unlimited eating or dropping.
+
+For discarding, require an explicit item allowlist, protect supplies and gear, and compare the entire stack value with the cap. Widen the unit price to `long` before multiplying by quantity; widening an already-overflowed `int` total is too late. Protect unknown/zero prices, and exclude discarded IDs from looting to prevent drop/pickup loops.
+
+**Defensive check:** Run `GrotesqueGuardiansInventoryTest` for slot confirmation, multi-bite food, food reserves, stack overflow, protected items and retry limits.
+
 ## Terminal supply stops need observed logout
 
 An owning script can set `withMissingSupplyHandler` on its Inventory Setup loader to keep its scheduled loop alive while `TerminalLogoutPrompt` closes the bank and requests logout. Do not show a blocking shortage notification or cancel that loop until `LOGGED_OUT` is observed. The default loader policy stays unchanged when no handler is supplied; ordinary breaks and world hops do not arm terminal Auto Login suppression.

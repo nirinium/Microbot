@@ -568,3 +568,50 @@ Polygon poly = Perspective.getCanvasTilePoly(client, localPoint);
 **Where this applies:** `Rs2Camera.isTileOnScreen(LocalPoint)`, `Rs2Camera.isTileOnScreen(TileObject)`, and any helper that projects an entity's local point to the canvas.
 
 **Defensive check:** Mock a worldview whose `getTileHeight` throws and assert out-of-scene points return false without calling it, as in `Rs2CameraTileOnScreenTest`.
+
+## 29. Choose instance dodge tiles from live scene collision, not the global map
+
+Raw world coordinates inside a boss instance describe the loaded scene, not necessarily a
+walkable location in the global shortest-path collision map. Filtering every dodge candidate
+through `Rs2Walker.isWalkableInCollisionMap` can reject the entire arena and leave the player
+standing in lightning or a shockwave.
+
+Use `Rs2Tile.getWalkableTilesAroundTile` with the player's raw scene-world location for local
+dodge candidates. This checks the loaded collision flags; an open endpoint alone does not
+prove that a route through walls or hazards is safe. Keep the dodge in scene coordinates and
+do not resume melee attacks until the mechanic's danger window expires, otherwise attacking
+can replace the walk destination and pull the player back into danger.
+
+**Defensive check:** `GrotesqueGuardiansMechanicsTest` supplies an instance tile from live
+collision and verifies selection without a global-map lookup, plus attack suppression during
+shockwave and hazard-retreat windows.
+
+## 30. Replan an emergency walk when another hazard invalidates its path
+
+A shockwave retreat and a falling-rock dodge must not own separate movement throttles.
+A rock can land on the requested escape tile, or its intermediate step, after the first
+walk request in the same game tick. A blanket once-per-tick movement gate then preserves
+the unsafe destination until it is too late.
+
+Use one movement arbiter for overlapping hazards. Keep a still-safe pending walk, but
+allow a new destination immediately when its route becomes unsafe. Check intermediate
+steps and collision edges, not only the endpoint; when already inside a hazard, permit
+steps that reduce or maintain danger while escaping. Send short straight waypoints so
+the client's own pathfinder does not cut across a different hazard at a bend. Failed
+dispatches must not count as successful movement, and unchanged retries still need throttling.
+
+**Defensive check:** `GrotesqueGuardiansDodgeTest` covers overlapping shockwave/rocks,
+blocked edges, intermediate hazards, and short waypoints; `GrotesqueGuardiansMechanicsTest`
+covers same-tick retargeting and immediate projectile-triggered replanning.
+
+## 31. Recover instanced NPC interactions in scene-local coordinates
+
+An NPC actor can expose a projected template `WorldPoint` while its `LocalPoint` belongs to the
+loaded boss arena. Passing that projected point to global can't-reach recovery starts WebWalk
+toward an unrelated overworld coordinate and eventually pauses every script after exhausting
+the shared retry counter. In an instance, validate the NPC's local point against its own world
+view, issue a direct scene walk, clear the shared can't-reach state only after dispatch, and retry
+the interaction on the next loop iteration.
+
+**Defensive check:** `GrotesqueGuardiansMechanicsTest` starts with four shared retries and verifies
+arena recovery dispatches local movement, clears the retry state, and never enters WebWalk.

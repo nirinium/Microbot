@@ -3,6 +3,7 @@ package net.runelite.client.plugins.microbot.nirigrotesqueguardians;
 import com.google.inject.Provides;
 import lombok.Getter;
 import net.runelite.api.Client;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.GraphicsObject;
 import net.runelite.api.NPC;
 import net.runelite.api.Projectile;
@@ -11,6 +12,7 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ClientTick;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GraphicsObjectCreated;
 import net.runelite.api.events.NpcDespawned;
@@ -38,7 +40,7 @@ import java.awt.GraphicsEnvironment;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class GrotesqueGuardiansPlugin extends Plugin {
-    public static final String VERSION = "0.7.13";
+    public static final String VERSION = "0.7.17";
 
     @Inject
     private Client client;
@@ -93,6 +95,13 @@ public class GrotesqueGuardiansPlugin extends Plugin {
         if (diagnosticsWindow != null) {
             diagnosticsWindow.close();
             diagnosticsWindow = null;
+        }
+    }
+
+    @Subscribe
+    public void onChatMessage(ChatMessage event) {
+        if (event.getType() == ChatMessageType.GAMEMESSAGE || event.getType() == ChatMessageType.SPAM) {
+            script.onInventorySpaceMessage(event.getMessage());
         }
     }
 

@@ -209,6 +209,50 @@ public interface GrotesqueGuardiansConfig extends Config {
         return 1000;
     }
 
+    @ConfigItem(keyName = "manageInventorySpace", name = "Manage inventory space",
+            description = "Recover from inventory-full messages and make room before looting",
+            position = 2, section = lootSection)
+    default boolean manageInventorySpace() {
+        return true;
+    }
+
+    @ConfigItem(keyName = "eatForInventorySpace", name = "Eat for space",
+            description = "Eat spare food when space is needed, even at full health",
+            position = 3, section = lootSection)
+    default boolean eatForInventorySpace() {
+        return true;
+    }
+
+    @ConfigItem(keyName = "inventoryFoodReserve", name = "Keep food slots",
+            description = "Minimum edible food slots to retain when eating for space; normal healing is unaffected",
+            position = 4, section = lootSection)
+    @Range(min = 0, max = 28)
+    default int inventoryFoodReserve() {
+        return 1;
+    }
+
+    @ConfigItem(keyName = "dropForInventorySpace", name = "Drop listed items for space",
+            description = "After spare food, drop only listed tradeable items below the total stack value cap",
+            position = 5, section = lootSection)
+    default boolean dropForInventorySpace() {
+        return true;
+    }
+
+    @ConfigItem(keyName = "inventoryDiscardNames", name = "Discardable item names",
+            description = "Comma-separated exact names; gear, food, potions, runes, coins and safety items stay protected",
+            position = 6, section = lootSection)
+    default String inventoryDiscardNames() {
+        return "Vial, Jug, Bowl, Bucket";
+    }
+
+    @ConfigItem(keyName = "inventoryDiscardValue", name = "Maximum discard stack value",
+            description = "Maximum GE value of the entire stack to drop; unknown/zero prices are never dropped",
+            position = 7, section = lootSection)
+    @Range(min = 0, max = 100000)
+    default int inventoryDiscardValue() {
+        return 1000;
+    }
+
     @ConfigItem(keyName = "repeatKills", name = "Repeat kills",
             description = "Ring the bell again after looting while supplies remain", position = 1, section = lootSection)
     default boolean repeatKills() {
